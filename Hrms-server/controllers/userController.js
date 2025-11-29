@@ -152,6 +152,96 @@ export const deleteUser = async (req, res) => {
   }
 };
 
+export const updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { paidLeaveAllocation } = req.body;
+    const currentUser = req.user;
+
+    // Only Admin and HR can update users
+    if (currentUser.role !== 'Admin' && currentUser.role !== 'HR') {
+      return res.status(403).json({ message: 'Only Admin and HR can update users' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const beforeData = JSON.stringify({ paidLeaveAllocation: user.paidLeaveAllocation });
+
+    // Update paid leave allocation - ADD to existing allocation
+    if (paidLeaveAllocation !== undefined) {
+      const allocation = parseInt(paidLeaveAllocation);
+      if (isNaN(allocation) || allocation < 0) {
+        return res.status(400).json({ message: 'Paid leave allocation must be a positive number' });
+      }
+      // Add to existing allocation (default to 0 if null/undefined)
+      const currentAllocation = user.paidLeaveAllocation || 0;
+      user.paidLeaveAllocation = currentAllocation + allocation;
+      // Update last allocation date
+      user.paidLeaveLastAllocatedDate = new Date();
+    }
+
+    await user.save();
+    const afterData = JSON.stringify({ paidLeaveAllocation: user.paidLeaveAllocation });
+
+    await logAction(
+      currentUser._id,
+      currentUser.name,
+      'UPDATE_USER',
+      'USER',
+      id,
+      `Updated paid leave allocation for ${user.name} to ${user.paidLeaveAllocation || 'default'}`,
+      beforeData,
+      afterData
+    );
+
+    const userObj = user.toObject();
+    delete userObj.password;
+
+    res.json({ message: 'User updated successfully', user: userObj });
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Reset all employees' paid leave allocation to 0
+export const resetAllPaidLeaveAllocation = async (req, res) => {
+  try {
+    const currentUser = req.user;
+
+    // Only Admin can reset all allocations
+    if (currentUser.role !== 'Admin') {
+      return res.status(403).json({ message: 'Only Admin can reset all paid leave allocations' });
+    }
+
+    // Reset all employees' and HR's paidLeaveAllocation to 0
+    const result = await User.updateMany(
+      { role: { $in: ['Employee', 'HR'] }, isActive: true },
+      { $set: { paidLeaveAllocation: 0 } }
+    );
+
+    await logAction(
+      currentUser._id,
+      currentUser.name,
+      'RESET_ALL_PAID_LEAVE',
+      'SYSTEM',
+      'ALL',
+      `Reset paid leave allocation to 0 for all employees (${result.modifiedCount} users)`
+    );
+
+    res.json({ 
+      message: `Successfully reset paid leave allocation to 0 for ${result.modifiedCount} users`,
+      count: result.modifiedCount
+    });
+  } catch (error) {
+    console.error('Reset all paid leave allocation error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 export const getEmployeeStats = async (req, res) => {
   try {
     const employees = await User.find({ role: 'Employee', isActive: true })
@@ -193,11 +283,10 @@ export const getEmployeeStats = async (req, res) => {
       });
 
       const leaveBreakdown = {
-        sick: leaves.filter(l => l.category === 'Sick Leave').length,
-        casual: leaves.filter(l => l.category === 'Casual Leave').length,
         paid: leaves.filter(l => l.category === 'Paid Leave').length,
         unpaid: leaves.filter(l => l.category === 'Unpaid Leave').length,
-        half: leaves.filter(l => l.category === 'Half Day').length,
+        half: leaves.filter(l => l.category === 'Half Day Leave').length,
+        extraTime: leaves.filter(l => l.category === 'Extra Time Leave').length,
         total: leaves.length
       };
 
