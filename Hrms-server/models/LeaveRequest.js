@@ -20,7 +20,7 @@ const leaveRequestSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ['Sick Leave', 'Casual Leave', 'Paid Leave', 'Unpaid Leave', 'Half Day', 'Company Holiday'],
+    enum: ['Paid Leave', 'Unpaid Leave', 'Half Day Leave', 'Extra Time Leave'],
     required: true
   },
   reason: {
