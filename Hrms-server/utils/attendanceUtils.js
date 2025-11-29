@@ -1,10 +1,11 @@
 // Business Rules
-// Standard day: 8 hours 15 minutes = 495 minutes
-// Low Time: worked < 8:15
-// Extra Time: worked > 8:15
+// Normal time: 8 hours 15 minutes to 8 hours 30 minutes (495 to 510 minutes)
+// Low Time: worked < 8:15 (< 495 minutes)
+// Extra Time: worked > 8:30 (> 510 minutes)
 // Half-day: threshold is 4 hours 7.5 minutes (half of 8:15)
 
-const STANDARD_DAY_MINUTES = 495; // 8h 15m
+const MIN_NORMAL_MINUTES = 495; // 8h 15m (lower bound for normal)
+const MAX_NORMAL_MINUTES = 510; // 8h 30m (upper bound for normal)
 const HALF_DAY_THRESHOLD_MINUTES = 247.5; // 4h 7.5m (half of standard)
 
 export const calculateDurationSeconds = (start, end) => {
@@ -37,12 +38,21 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
 export const getFlags = (workedSeconds, isHalfDayApproved) => {
   const workedMinutes = workedSeconds / 60;
   
-  // Use half-day threshold if approved, otherwise standard day
-  const threshold = isHalfDayApproved ? HALF_DAY_THRESHOLD_MINUTES : STANDARD_DAY_MINUTES;
+  // Use half-day threshold if approved, otherwise use normal range
+  if (isHalfDayApproved) {
+    // For half-day, use half of the normal range
+    const halfMinNormal = MIN_NORMAL_MINUTES / 2; // 247.5 minutes
+    const halfMaxNormal = MAX_NORMAL_MINUTES / 2; // 255 minutes
+    return {
+      lowTime: workedMinutes > 0 && workedMinutes < halfMinNormal,
+      extraTime: workedMinutes > halfMaxNormal
+    };
+  }
 
+  // Normal logic: Normal = 8:15 to 8:30, Low < 8:15, Extra > 8:30
   return {
-    lowTime: workedMinutes > 0 && workedMinutes < threshold,
-    extraTime: workedMinutes > threshold
+    lowTime: workedMinutes > 0 && workedMinutes < MIN_NORMAL_MINUTES,
+    extraTime: workedMinutes > MAX_NORMAL_MINUTES
   };
 };
 
