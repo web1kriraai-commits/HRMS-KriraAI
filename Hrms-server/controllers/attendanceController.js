@@ -211,8 +211,65 @@ export const adminCreateAttendance = async (req, res) => {
       // Update existing record
       const beforeData = JSON.stringify(attendance.toObject());
 
-      if (checkIn) attendance.checkIn = new Date(checkIn);
-      if (checkOut) attendance.checkOut = new Date(checkOut);
+      // Parse time strings and combine with date
+      const baseDate = new Date(date);
+      
+      if (checkIn) {
+        // Handle time format like "09:00" or "09:00 AM"
+        let timeStr = checkIn.trim();
+        let hours, minutes;
+        
+        if (timeStr.includes('AM') || timeStr.includes('PM')) {
+          // 12-hour format
+          const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
+          const [h, m] = timePart.split(':');
+          hours = parseInt(h, 10);
+          minutes = parseInt(m || '0', 10);
+          
+          if (period.toUpperCase() === 'PM' && hours !== 12) {
+            hours += 12;
+          } else if (period.toUpperCase() === 'AM' && hours === 12) {
+            hours = 0;
+          }
+        } else {
+          // 24-hour format
+          const [h, m] = timeStr.split(':');
+          hours = parseInt(h, 10);
+          minutes = parseInt(m || '0', 10);
+        }
+        
+        attendance.checkIn = new Date(baseDate);
+        attendance.checkIn.setHours(hours, minutes, 0, 0);
+      }
+      
+      if (checkOut) {
+        // Handle time format like "18:00" or "06:00 PM"
+        let timeStr = checkOut.trim();
+        let hours, minutes;
+        
+        if (timeStr.includes('AM') || timeStr.includes('PM')) {
+          // 12-hour format
+          const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
+          const [h, m] = timePart.split(':');
+          hours = parseInt(h, 10);
+          minutes = parseInt(m || '0', 10);
+          
+          if (period.toUpperCase() === 'PM' && hours !== 12) {
+            hours += 12;
+          } else if (period.toUpperCase() === 'AM' && hours === 12) {
+            hours = 0;
+          }
+        } else {
+          // 24-hour format
+          const [h, m] = timeStr.split(':');
+          hours = parseInt(h, 10);
+          minutes = parseInt(m || '0', 10);
+        }
+        
+        attendance.checkOut = new Date(baseDate);
+        attendance.checkOut.setHours(hours, minutes, 0, 0);
+      }
+      
       if (notes !== undefined) attendance.notes = notes;
 
       if (breakDurationMinutes !== undefined) {
@@ -262,15 +319,59 @@ export const adminCreateAttendance = async (req, res) => {
     let checkOutDate = null;
 
     if (checkIn) {
-      const [h, m] = checkIn.split(':');
+      // Handle time format like "09:00" or "09:00 AM"
+      let timeStr = checkIn.trim();
+      let hours, minutes;
+      
+      if (timeStr.includes('AM') || timeStr.includes('PM')) {
+        // 12-hour format
+        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
+        const [h, m] = timePart.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+        
+        if (period.toUpperCase() === 'PM' && hours !== 12) {
+          hours += 12;
+        } else if (period.toUpperCase() === 'AM' && hours === 12) {
+          hours = 0;
+        }
+      } else {
+        // 24-hour format
+        const [h, m] = timeStr.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+      }
+      
       checkInDate = new Date(baseDate);
-      checkInDate.setHours(parseInt(h), parseInt(m), 0, 0);
+      checkInDate.setHours(hours, minutes, 0, 0);
     }
 
     if (checkOut) {
-      const [h, m] = checkOut.split(':');
+      // Handle time format like "18:00" or "06:00 PM"
+      let timeStr = checkOut.trim();
+      let hours, minutes;
+      
+      if (timeStr.includes('AM') || timeStr.includes('PM')) {
+        // 12-hour format
+        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
+        const [h, m] = timePart.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+        
+        if (period.toUpperCase() === 'PM' && hours !== 12) {
+          hours += 12;
+        } else if (period.toUpperCase() === 'AM' && hours === 12) {
+          hours = 0;
+        }
+      } else {
+        // 24-hour format
+        const [h, m] = timeStr.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+      }
+      
       checkOutDate = new Date(baseDate);
-      checkOutDate.setHours(parseInt(h), parseInt(m), 0, 0);
+      checkOutDate.setHours(hours, minutes, 0, 0);
     }
 
     const breaks = [];
@@ -339,8 +440,65 @@ export const adminUpdateAttendance = async (req, res) => {
 
     const beforeData = JSON.stringify(attendance.toObject());
 
-    if (checkIn) attendance.checkIn = new Date(checkIn);
-    if (checkOut) attendance.checkOut = new Date(checkOut);
+    // Parse time strings and combine with date
+    const baseDate = new Date(attendance.date);
+    
+    if (checkIn) {
+      // Handle time format like "09:00" or "09:00 AM"
+      let timeStr = checkIn.trim();
+      let hours, minutes;
+      
+      if (timeStr.includes('AM') || timeStr.includes('PM')) {
+        // 12-hour format
+        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
+        const [h, m] = timePart.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+        
+        if (period.toUpperCase() === 'PM' && hours !== 12) {
+          hours += 12;
+        } else if (period.toUpperCase() === 'AM' && hours === 12) {
+          hours = 0;
+        }
+      } else {
+        // 24-hour format
+        const [h, m] = timeStr.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+      }
+      
+      attendance.checkIn = new Date(baseDate);
+      attendance.checkIn.setHours(hours, minutes, 0, 0);
+    }
+    
+    if (checkOut) {
+      // Handle time format like "18:00" or "06:00 PM"
+      let timeStr = checkOut.trim();
+      let hours, minutes;
+      
+      if (timeStr.includes('AM') || timeStr.includes('PM')) {
+        // 12-hour format
+        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
+        const [h, m] = timePart.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+        
+        if (period.toUpperCase() === 'PM' && hours !== 12) {
+          hours += 12;
+        } else if (period.toUpperCase() === 'AM' && hours === 12) {
+          hours = 0;
+        }
+      } else {
+        // 24-hour format
+        const [h, m] = timeStr.split(':');
+        hours = parseInt(h, 10);
+        minutes = parseInt(m || '0', 10);
+      }
+      
+      attendance.checkOut = new Date(baseDate);
+      attendance.checkOut.setHours(hours, minutes, 0, 0);
+    }
+    
     if (notes !== undefined) attendance.notes = notes;
 
     // Override breaks if provided
