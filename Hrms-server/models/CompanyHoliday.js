@@ -9,6 +9,20 @@ const companyHolidaySchema = new mongoose.Schema({
   description: {
     type: String,
     required: true
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false // Optional for backward compatibility
+  },
+  createdByName: {
+    type: String,
+    required: false
+  },
+  createdByRole: {
+    type: String,
+    enum: ['Admin', 'HR', 'Employee'],
+    required: false
   }
 }, {
   timestamps: true
