@@ -5,7 +5,9 @@ import {
   createUser,
   getUsersByRole,
   getEmployeeStats,
-  deleteUser
+  deleteUser,
+  updateUser,
+  resetAllPaidLeaveAllocation
 } from '../controllers/userController.js';
 
 const router = express.Router();
@@ -18,6 +20,8 @@ router.get('/role/:role', getUsersByRole);
 router.get('/stats/employees', authorize('HR', 'Admin'), getEmployeeStats);
 // Admin can create any role, HR can only create Employee (checked in controller)
 router.post('/', authorize('HR', 'Admin'), createUser);
+router.put('/:id', authorize('HR', 'Admin'), updateUser);
+router.post('/reset-paid-leave', authorize('Admin'), resetAllPaidLeaveAllocation);
 router.delete('/:id', authorize('Admin'), deleteUser);
 
 export default router;
