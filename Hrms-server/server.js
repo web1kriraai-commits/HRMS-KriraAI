@@ -16,6 +16,8 @@ import reportRoutes from './routes/reportRoutes.js';
 
 // Import notification cleanup function
 import { cleanupOldNotifications } from './controllers/notificationController.js';
+// Import auto add Sundays function
+import { autoAddSundays } from './controllers/holidayController.js';
 
 dotenv.config();
 
@@ -57,7 +59,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   
   // Run cleanup immediately on server start
@@ -69,5 +71,50 @@ app.listen(PORT, () => {
   }, 60 * 60 * 1000); // 1 hour in milliseconds
   
   console.log('Notification cleanup scheduled to run every hour');
+  
+  // Auto-add Sundays if today is Saturday
+  try {
+    const result = await autoAddSundays();
+    if (result.added > 0) {
+      console.log(`Auto-added ${result.added} Sunday(s) as holiday: ${result.dates.join(', ')}`);
+    }
+  } catch (error) {
+    console.error('Error auto-adding Sundays:', error);
+  }
+  
+  // Schedule auto-add Sundays to run daily at midnight
+  const scheduleAutoAddSundays = () => {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0); // Set to midnight
+    
+    const msUntilMidnight = tomorrow.getTime() - now.getTime();
+    
+    setTimeout(() => {
+      // Run immediately at midnight
+      autoAddSundays().then(result => {
+        if (result.added > 0) {
+          console.log(`Auto-added ${result.added} Sunday(s) as holiday: ${result.dates.join(', ')}`);
+        }
+      }).catch(error => {
+        console.error('Error auto-adding Sundays:', error);
+      });
+      
+      // Then schedule to run every 24 hours
+      setInterval(() => {
+        autoAddSundays().then(result => {
+          if (result.added > 0) {
+            console.log(`Auto-added ${result.added} Sunday(s) as holiday: ${result.dates.join(', ')}`);
+          }
+        }).catch(error => {
+          console.error('Error auto-adding Sundays:', error);
+        });
+      }, 24 * 60 * 60 * 1000); // 24 hours
+    }, msUntilMidnight);
+  };
+  
+  scheduleAutoAddSundays();
+  console.log('Sunday auto-add scheduled to run daily at midnight');
 });
 
