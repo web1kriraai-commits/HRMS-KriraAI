@@ -2,7 +2,8 @@ import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
 const generateToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '7d' });
+  // Generate token with 1 year expiration
+  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '365d' });
 };
 
 export const login = async (req, res) => {
