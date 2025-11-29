@@ -8,12 +8,26 @@ export const requestLeave = async (req, res) => {
     const userId = req.user._id;
     const { startDate, endDate, category, reason, attachmentUrl } = req.body;
 
+    console.log('Leave request received:', { startDate, endDate, category, reason: reason?.substring(0, 50) });
+
     if (!startDate || !endDate || !category || !reason) {
+      console.error('Missing required fields:', { startDate: !!startDate, endDate: !!endDate, category: !!category, reason: !!reason });
       return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // Validate category
+    const validCategories = ['Paid Leave', 'Unpaid Leave', 'Half Day Leave', 'Extra Time Leave'];
+    if (!validCategories.includes(category)) {
+      console.error('Invalid category:', category);
+      return res.status(400).json({ 
+        message: `Invalid leave category. Must be one of: ${validCategories.join(', ')}`,
+        received: category
+      });
     }
 
     const user = await User.findById(userId);
     if (!user) {
+      console.error('User not found:', userId);
       return res.status(404).json({ message: 'User not found' });
     }
 
@@ -24,27 +38,83 @@ export const requestLeave = async (req, res) => {
       endDate,
       category,
       reason,
-      attachmentUrl,
+      attachmentUrl: attachmentUrl || undefined,
       status: 'Pending'
     });
 
-    await leaveRequest.save();
-    await sendNotification(userId, `Leave request submitted for ${startDate}`);
-
-    // Notify HR/Admin
-    const targetRoles = (user.role === 'HR' || user.role === 'Admin') ? ['Admin'] : ['HR', 'Admin'];
-    const approvers = await User.find({ role: { $in: targetRoles }, isActive: true });
-    
-    for (const approver of approvers) {
-      if (approver._id.toString() !== userId.toString()) {
-        await sendNotification(approver._id, `New leave request from ${user.name}`);
+    let savedLeave;
+    try {
+      savedLeave = await leaveRequest.save();
+      console.log('Leave request saved successfully:', savedLeave._id);
+    } catch (saveError) {
+      console.error('Leave request save error:', saveError);
+      if (saveError.name === 'ValidationError') {
+        const validationErrors = {};
+        if (saveError.errors) {
+          Object.keys(saveError.errors).forEach(key => {
+            validationErrors[key] = saveError.errors[key].message;
+          });
+        }
+        return res.status(400).json({ 
+          message: 'Validation error',
+          error: saveError.message,
+          details: validationErrors
+        });
       }
+      // Re-throw to be caught by outer catch
+      throw saveError;
     }
 
-    res.status(201).json(leaveRequest);
+    // Send notifications (don't fail if notification fails)
+    try {
+      await sendNotification(userId, `Leave request submitted for ${startDate}`);
+    } catch (notifError) {
+      console.error('Notification error (non-fatal):', notifError);
+    }
+
+    // Notify HR/Admin (don't fail if notification fails)
+    try {
+      const targetRoles = (user.role === 'HR' || user.role === 'Admin') ? ['Admin'] : ['HR', 'Admin'];
+      const approvers = await User.find({ role: { $in: targetRoles }, isActive: true });
+      
+      for (const approver of approvers) {
+        if (approver._id.toString() !== userId.toString()) {
+          try {
+            await sendNotification(approver._id, `New leave request from ${user.name}`);
+          } catch (notifError) {
+            console.error(`Notification error for approver ${approver._id} (non-fatal):`, notifError);
+          }
+        }
+      }
+    } catch (notifError) {
+      console.error('HR notification error (non-fatal):', notifError);
+    }
+
+    // Return the saved leave request
+    res.status(201).json(savedLeave);
   } catch (error) {
     console.error('Request leave error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Error stack:', error.stack);
+    
+    // Return more detailed error message
+    const errorMessage = error.message || 'Server error';
+    const isValidationError = error.name === 'ValidationError';
+    
+    // Format validation errors
+    let errorDetails = undefined;
+    if (isValidationError && error.errors) {
+      errorDetails = {};
+      Object.keys(error.errors).forEach(key => {
+        errorDetails[key] = error.errors[key].message;
+      });
+    }
+    
+    res.status(500).json({ 
+      message: isValidationError ? `Validation error: ${errorMessage}` : `Server error: ${errorMessage}`,
+      error: errorMessage,
+      details: errorDetails,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 };
 
