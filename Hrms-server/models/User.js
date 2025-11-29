@@ -50,6 +50,13 @@ const userSchema = new mongoose.Schema({
   },
   lastLogin: {
     type: Date
+  },
+  paidLeaveAllocation: {
+    type: Number,
+    default: 0 // Additional allocation added by admin (starts at 0, added to default)
+  },
+  paidLeaveLastAllocatedDate: {
+    type: Date // Last date when paid leave was allocated
   }
 }, {
   timestamps: true
