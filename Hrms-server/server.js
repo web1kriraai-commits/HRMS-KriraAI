@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import mongoose from 'mongoose';
 import connectDB from './config/database.js';
 
 // Import routes
@@ -16,8 +17,10 @@ import reportRoutes from './routes/reportRoutes.js';
 
 // Import notification cleanup function
 import { cleanupOldNotifications } from './controllers/notificationController.js';
-// Import auto add Sundays function
-import { autoAddSundays } from './controllers/holidayController.js';
+// Import auto add Sundays functions
+import { autoAddSundays, autoAddSundaysForMonth } from './controllers/holidayController.js';
+// Import function to drop unique indexes
+import { dropUniqueIndexes } from './models/User.js';
 
 dotenv.config();
 
@@ -26,6 +29,16 @@ const PORT = process.env.PORT || 5001;
 
 // Connect to MongoDB
 connectDB();
+
+// Drop unique indexes after database connection is established
+mongoose.connection.on('connected', async () => {
+  try {
+    await dropUniqueIndexes();
+    console.log('Unique indexes on username and email have been removed (duplicates allowed)');
+  } catch (error) {
+    console.log('Note: Could not drop indexes (will be handled on first user creation)');
+  }
+});
 
 // Middleware
 app.use(cors());
@@ -72,6 +85,16 @@ app.listen(PORT, async () => {
   
   console.log('Notification cleanup scheduled to run every hour');
   
+  // Auto-add Sundays for the month if today is the 1st
+  try {
+    const monthResult = await autoAddSundaysForMonth();
+    if (monthResult.added > 0) {
+      console.log(`Auto-added ${monthResult.added} Sunday(s) for the month: ${monthResult.dates.join(', ')}`);
+    }
+  } catch (error) {
+    console.error('Error auto-adding Sundays for month:', error);
+  }
+  
   // Auto-add Sundays if today is Saturday
   try {
     const result = await autoAddSundays();
@@ -81,6 +104,41 @@ app.listen(PORT, async () => {
   } catch (error) {
     console.error('Error auto-adding Sundays:', error);
   }
+  
+  // Schedule auto-add Sundays for month to run daily at midnight (checks if it's 1st)
+  const scheduleAutoAddSundaysForMonth = () => {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0); // Set to midnight
+    
+    const msUntilMidnight = tomorrow.getTime() - now.getTime();
+    
+    setTimeout(() => {
+      // Run immediately at midnight
+      autoAddSundaysForMonth().then(result => {
+        if (result.added > 0) {
+          console.log(`Auto-added ${result.added} Sunday(s) for the month: ${result.dates.join(', ')}`);
+        }
+      }).catch(error => {
+        console.error('Error auto-adding Sundays for month:', error);
+      });
+      
+      // Then schedule to run every 24 hours
+      setInterval(() => {
+        autoAddSundaysForMonth().then(result => {
+          if (result.added > 0) {
+            console.log(`Auto-added ${result.added} Sunday(s) for the month: ${result.dates.join(', ')}`);
+          }
+        }).catch(error => {
+          console.error('Error auto-adding Sundays for month:', error);
+        });
+      }, 24 * 60 * 60 * 1000); // 24 hours
+    }, msUntilMidnight);
+  };
+  
+  scheduleAutoAddSundaysForMonth();
+  console.log('Sunday auto-add for month scheduled to run daily at midnight (checks if 1st of month)');
   
   // Schedule auto-add Sundays to run daily at midnight
   const scheduleAutoAddSundays = () => {
