@@ -110,25 +110,25 @@ export const getCurrentUser = async (req, res) => {
   }
 };
 
-// Reset Password - verify email and set new password
+// Reset Password - verify username and set new password
 export const resetPassword = async (req, res) => {
   try {
-    const { email, newPassword } = req.body;
+    const { username, newPassword } = req.body;
 
-    if (!email || email.trim() === '') {
-      return res.status(400).json({ message: 'Email is required' });
+    if (!username || username.trim() === '') {
+      return res.status(400).json({ message: 'Username is required' });
     }
 
     if (!newPassword || newPassword.length < 4) {
       return res.status(400).json({ message: 'Password must be at least 4 characters' });
     }
 
-    const emailLower = email.toLowerCase().trim();
+    const usernameLower = username.toLowerCase().trim();
 
-    // Find user by email
-    const user = await User.findOne({ email: emailLower });
+    // Find user by username
+    const user = await User.findOne({ username: usernameLower });
     if (!user) {
-      return res.status(404).json({ message: 'No account found with this email' });
+      return res.status(404).json({ message: 'No account found with this username' });
     }
 
     if (!user.isActive) {
