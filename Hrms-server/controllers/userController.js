@@ -18,8 +18,35 @@ export const getAllUsers = async (req, res) => {
 
 export const createUser = async (req, res) => {
   try {
-    const { name, username, email, role, department, password } = req.body;
+    const { name, username, email, role, department, password, joiningDate } = req.body;
     const currentUser = req.user;
+
+    // Convert joiningDate to dd-mm-yyyy format if provided
+    let formattedJoiningDate = undefined;
+    if (joiningDate) {
+      try {
+        // If date is in yyyy-mm-dd format (from HTML date input), convert to dd-mm-yyyy
+        if (joiningDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          const [year, month, day] = joiningDate.split('-');
+          formattedJoiningDate = `${day}-${month}-${year}`;
+        } else if (joiningDate.match(/^\d{2}-\d{2}-\d{4}$/)) {
+          // Already in dd-mm-yyyy format
+          formattedJoiningDate = joiningDate;
+        } else {
+          // Try to parse as Date and convert to dd-mm-yyyy
+          const date = new Date(joiningDate);
+          if (!isNaN(date.getTime())) {
+            const day = String(date.getDate()).padStart(2, '0');
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const year = date.getFullYear();
+            formattedJoiningDate = `${day}-${month}-${year}`;
+          }
+        }
+      } catch (error) {
+        // If conversion fails, use as is
+        formattedJoiningDate = joiningDate;
+      }
+    }
 
     if (!name || !username || !email || !role || !department) {
       return res.status(400).json({ message: 'Missing required fields' });
@@ -40,15 +67,6 @@ export const createUser = async (req, res) => {
       });
     }
 
-    // Check if username or email already exists
-    const existing = await User.findOne({
-      $or: [{ username: username.toLowerCase() }, { email: email.toLowerCase() }]
-    });
-
-    if (existing) {
-      return res.status(400).json({ message: 'Username or email already exists' });
-    }
-
     // Password is optional - if not provided, use temporary password
     // User will need to change password on first login
     const userPassword = password && password.trim() !== '' ? password : 'tempPassword123';
@@ -62,10 +80,34 @@ export const createUser = async (req, res) => {
       department,
       password: userPassword,
       isFirstLogin: isFirstLogin,
-      isActive: true
+      isActive: true,
+      joiningDate: formattedJoiningDate
     });
 
-    await user.save();
+    try {
+      await user.save();
+    } catch (saveError) {
+      // If it's a duplicate key error (MongoDB unique index), drop indexes and retry
+      if (saveError.code === 11000) {
+        try {
+          // Try to drop unique indexes
+          const indexes = await User.collection.indexes();
+          for (const index of indexes) {
+            if (index.name === 'username_1' || index.name === 'email_1' || 
+                (index.key && (index.key.username === 1 || index.key.email === 1))) {
+              await User.collection.dropIndex(index.name).catch(() => {});
+            }
+          }
+          // Retry saving after dropping indexes
+          await user.save();
+        } catch (retryError) {
+          // If still fails, throw the original error
+          throw saveError;
+        }
+      } else {
+        throw saveError;
+      }
+    }
     
     const userObj = user.toObject();
     delete userObj.password;
@@ -88,9 +130,6 @@ export const createUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Create user error:', error);
-    if (error.code === 11000) {
-      return res.status(400).json({ message: 'Username or email already exists' });
-    }
     res.status(500).json({ message: 'Server error' });
   }
 };
