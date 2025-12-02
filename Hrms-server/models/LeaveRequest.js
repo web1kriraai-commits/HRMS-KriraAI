@@ -37,6 +37,12 @@ const leaveRequestSchema = new mongoose.Schema({
   },
   hrComment: {
     type: String
+  },
+  startTime: {
+    type: String // HH:mm format for extra time leave and half day leave
+  },
+  endTime: {
+    type: String // HH:mm format for extra time leave and half day leave
   }
 }, {
   timestamps: true
