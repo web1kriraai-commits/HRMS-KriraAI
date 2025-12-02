@@ -6,7 +6,8 @@ import { sendNotification } from './notificationController.js';
 export const requestLeave = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { startDate, endDate, category, reason, attachmentUrl } = req.body;
+    const { startDate, endDate, category, reason, attachmentUrl, startTime } = req.body;
+    let { endTime } = req.body;
 
     console.log('Leave request received:', { startDate, endDate, category, reason: reason?.substring(0, 50) });
 
@@ -25,6 +26,30 @@ export const requestLeave = async (req, res) => {
       });
     }
 
+    // Validate time fields for extra time leave and half day leave
+    if (category === 'Extra Time Leave') {
+      if (!startTime || !endTime) {
+        return res.status(400).json({ 
+          message: 'Start time and end time are required for Extra Time Leave'
+        });
+      }
+    } else if (category === 'Half Day Leave') {
+      if (!startTime) {
+        return res.status(400).json({ 
+          message: 'Start time is required for Half Day Leave'
+        });
+      }
+      // Calculate end time for half day leave if not provided (add 4 hours)
+      if (!endTime && startTime) {
+        const [hours, minutes] = startTime.split(':').map(Number);
+        const startMinutes = hours * 60 + minutes;
+        const endMinutes = startMinutes + 240; // 4 hours = 240 minutes
+        const endHours = Math.floor(endMinutes / 60) % 24;
+        const endMins = endMinutes % 60;
+        endTime = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`;
+      }
+    }
+
     const user = await User.findById(userId);
     if (!user) {
       console.error('User not found:', userId);
@@ -39,7 +64,9 @@ export const requestLeave = async (req, res) => {
       category,
       reason,
       attachmentUrl: attachmentUrl || undefined,
-      status: 'Pending'
+      status: 'Pending',
+      startTime: startTime || undefined,
+      endTime: endTime || undefined
     });
 
     let savedLeave;
