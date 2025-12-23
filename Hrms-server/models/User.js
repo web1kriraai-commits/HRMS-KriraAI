@@ -10,14 +10,12 @@ const userSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
-    unique: true,
     trim: true,
     lowercase: true
   },
   email: {
     type: String,
     required: true,
-    unique: true,
     trim: true,
     lowercase: true
   },
@@ -57,7 +55,37 @@ const userSchema = new mongoose.Schema({
   },
   paidLeaveLastAllocatedDate: {
     type: Date // Last date when paid leave was allocated
-  }
+  },
+  joiningDate: {
+    type: String, // Employee joining date in dd-mm-yyyy format
+    trim: true
+  },
+  bonds: [{
+    type: {
+      type: String,
+      enum: ['Internship', 'Job', 'Other'],
+      required: true
+    },
+    periodMonths: {
+      type: Number,
+      required: true,
+      min: 1
+    },
+    startDate: {
+      type: String, // Bond start date in dd-mm-yyyy format
+      required: true,
+      trim: true
+    },
+    order: {
+      type: Number, // Order of bond (1, 2, 3, etc.)
+      required: true,
+      default: 1
+    },
+    salary: {
+      type: Number, // Salary for Job bond or Stipend for Internship bond
+      default: 0
+    }
+  }]
 }, {
   timestamps: true
 });
@@ -74,7 +102,36 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-export default mongoose.model('User', userSchema);
+const User = mongoose.model('User', userSchema);
+
+// Function to drop unique indexes on username and email to allow duplicates
+export const dropUniqueIndexes = async () => {
+  try {
+    if (User.collection) {
+      const indexes = await User.collection.indexes();
+      for (const index of indexes) {
+        // Drop unique indexes on username and email
+        if (index.name === 'username_1' || index.name === 'email_1' || 
+            (index.key && (index.key.username === 1 || index.key.email === 1))) {
+          try {
+            await User.collection.dropIndex(index.name);
+            console.log(`Dropped unique index: ${index.name}`);
+          } catch (err) {
+            // Index might not exist, ignore error
+            if (err.code !== 27) { // 27 = IndexNotFound
+              console.log(`Note: Could not drop index ${index.name}`);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    // Ignore errors - indexes might not exist
+    console.log('Note: Could not check/drop indexes (this is normal if collection is empty)');
+  }
+};
+
+export default User;
 
 
 

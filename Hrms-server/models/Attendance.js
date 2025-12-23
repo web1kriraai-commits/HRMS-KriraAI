@@ -16,6 +16,10 @@ const breakSchema = new mongoose.Schema({
   durationSeconds: {
     type: Number,
     default: 0
+  },
+  reason: {
+    type: String,
+    trim: true
   }
 }, { _id: true });
 
