@@ -57,7 +57,10 @@ export const login = async (req, res) => {
         department: user.department,
         isActive: user.isActive,
         isFirstLogin: user.isFirstLogin,
-        lastLogin: user.lastLogin
+        lastLogin: user.lastLogin,
+        aadhaarNumber: user.aadhaarNumber,
+        guardianName: user.guardianName,
+        mobileNumber: user.mobileNumber
       },
       requiresPasswordChange: user.isFirstLogin || false
     });
@@ -105,7 +108,10 @@ export const getCurrentUser = async (req, res) => {
         department: user.department,
         isActive: user.isActive,
         isFirstLogin: user.isFirstLogin,
-        lastLogin: user.lastLogin
+        lastLogin: user.lastLogin,
+        aadhaarNumber: user.aadhaarNumber,
+        guardianName: user.guardianName,
+        mobileNumber: user.mobileNumber
       }
     });
   } catch (error) {

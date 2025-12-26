@@ -38,6 +38,18 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  aadhaarNumber: {
+    type: String,
+    trim: true
+  },
+  guardianName: {
+    type: String,
+    trim: true
+  },
+  mobileNumber: {
+    type: String,
+    trim: true
+  },
   isActive: {
     type: Boolean,
     default: true
@@ -91,14 +103,14 @@ const userSchema = new mongoose.Schema({
 });
 
 // Hash password before saving
-userSchema.pre('save', async function(next) {
+userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   this.password = await bcrypt.hash(this.password, 10);
   next();
 });
 
 // Compare password method
-userSchema.methods.comparePassword = async function(candidatePassword) {
+userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
@@ -111,8 +123,8 @@ export const dropUniqueIndexes = async () => {
       const indexes = await User.collection.indexes();
       for (const index of indexes) {
         // Drop unique indexes on username and email
-        if (index.name === 'username_1' || index.name === 'email_1' || 
-            (index.key && (index.key.username === 1 || index.key.email === 1))) {
+        if (index.name === 'username_1' || index.name === 'email_1' ||
+          (index.key && (index.key.username === 1 || index.key.email === 1))) {
           try {
             await User.collection.dropIndex(index.name);
             console.log(`Dropped unique index: ${index.name}`);

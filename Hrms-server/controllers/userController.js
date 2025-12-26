@@ -46,12 +46,12 @@ const formatDateToDDMMYYYY = (dateStr) => {
 
 export const createUser = async (req, res) => {
   try {
-    const { name, username, email, role, department, password, joiningDate, bonds } = req.body;
+    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber } = req.body;
     const currentUser = req.user;
 
     // Convert dates to dd-mm-yyyy format if provided
     const formattedJoiningDate = formatDateToDDMMYYYY(joiningDate);
-    
+
     // Process bonds array
     let formattedBonds = [];
     if (bonds && Array.isArray(bonds) && bonds.length > 0) {
@@ -73,13 +73,13 @@ export const createUser = async (req, res) => {
     // Admin and HR can create Employee
     if (currentUser.role === 'HR') {
       if (role !== 'Employee') {
-        return res.status(403).json({ 
-          message: 'HR can only create Employee users. Only Admin can create Admin and HR users.' 
+        return res.status(403).json({
+          message: 'HR can only create Employee users. Only Admin can create Admin and HR users.'
         });
       }
     } else if (currentUser.role !== 'Admin') {
-      return res.status(403).json({ 
-        message: 'Only Admin and HR can create users.' 
+      return res.status(403).json({
+        message: 'Only Admin and HR can create users.'
       });
     }
 
@@ -98,7 +98,10 @@ export const createUser = async (req, res) => {
       isFirstLogin: isFirstLogin,
       isActive: true,
       joiningDate: formattedJoiningDate,
-      bonds: formattedBonds
+      bonds: formattedBonds,
+      aadhaarNumber: aadhaarNumber || undefined,
+      guardianName: guardianName || undefined,
+      mobileNumber: mobileNumber || undefined
     });
 
     try {
@@ -110,9 +113,9 @@ export const createUser = async (req, res) => {
           // Try to drop unique indexes
           const indexes = await User.collection.indexes();
           for (const index of indexes) {
-            if (index.name === 'username_1' || index.name === 'email_1' || 
-                (index.key && (index.key.username === 1 || index.key.email === 1))) {
-              await User.collection.dropIndex(index.name).catch(() => {});
+            if (index.name === 'username_1' || index.name === 'email_1' ||
+              (index.key && (index.key.username === 1 || index.key.email === 1))) {
+              await User.collection.dropIndex(index.name).catch(() => { });
             }
           }
           // Retry saving after dropping indexes
@@ -125,7 +128,7 @@ export const createUser = async (req, res) => {
         throw saveError;
       }
     }
-    
+
     const userObj = user.toObject();
     delete userObj.password;
 
@@ -141,9 +144,9 @@ export const createUser = async (req, res) => {
       JSON.stringify(userObj)
     );
 
-    res.status(201).json({ 
+    res.status(201).json({
       message: 'User created successfully. Temporary password: tempPassword123',
-      user: userObj 
+      user: userObj
     });
   } catch (error) {
     console.error('Create user error:', error);
@@ -211,7 +214,7 @@ export const deleteUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { paidLeaveAllocation, joiningDate, bonds, name, email, department } = req.body;
+    const { paidLeaveAllocation, joiningDate, bonds, name, email, department, aadhaarNumber, guardianName, mobileNumber } = req.body;
     const currentUser = req.user;
 
     // Only Admin and HR can update users
@@ -224,13 +227,16 @@ export const updateUser = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const beforeData = JSON.stringify({ 
+    const beforeData = JSON.stringify({
       name: user.name,
       email: user.email,
       department: user.department,
       paidLeaveAllocation: user.paidLeaveAllocation,
       joiningDate: user.joiningDate,
-      bonds: user.bonds
+      bonds: user.bonds,
+      aadhaarNumber: user.aadhaarNumber,
+      guardianName: user.guardianName,
+      mobileNumber: user.mobileNumber
     });
 
     // Update name if provided
@@ -246,6 +252,21 @@ export const updateUser = async (req, res) => {
     // Update department if provided
     if (department !== undefined && department.trim() !== '') {
       user.department = department.trim();
+    }
+
+    // Update aadhaar number if provided
+    if (aadhaarNumber !== undefined) {
+      user.aadhaarNumber = aadhaarNumber.trim() || undefined;
+    }
+
+    // Update guardian name if provided
+    if (guardianName !== undefined) {
+      user.guardianName = guardianName.trim() || undefined;
+    }
+
+    // Update mobile number if provided
+    if (mobileNumber !== undefined) {
+      user.mobileNumber = mobileNumber.trim() || undefined;
     }
 
     // Update paid leave allocation - ADD to existing allocation
@@ -278,13 +299,16 @@ export const updateUser = async (req, res) => {
     }
 
     await user.save();
-    const afterData = JSON.stringify({ 
+    const afterData = JSON.stringify({
       name: user.name,
       email: user.email,
       department: user.department,
       paidLeaveAllocation: user.paidLeaveAllocation,
       joiningDate: user.joiningDate,
-      bonds: user.bonds
+      bonds: user.bonds,
+      aadhaarNumber: user.aadhaarNumber,
+      guardianName: user.guardianName,
+      mobileNumber: user.mobileNumber
     });
 
     await logAction(
@@ -333,7 +357,7 @@ export const resetAllPaidLeaveAllocation = async (req, res) => {
       `Reset paid leave allocation to 0 for all employees (${result.modifiedCount} users)`
     );
 
-    res.json({ 
+    res.json({
       message: `Successfully reset paid leave allocation to 0 for ${result.modifiedCount} users`,
       count: result.modifiedCount
     });
@@ -350,12 +374,12 @@ export const getEmployeeStats = async (req, res) => {
 
     const stats = await Promise.all(employees.map(async (employee) => {
       const records = await Attendance.find({ userId: employee._id });
-      
+
       // Recalculate flags for records that have checkIn and checkOut but might be missing flags
       for (const record of records) {
         if (record.checkIn && record.checkOut && (record.lowTimeFlag === undefined || record.extraTimeFlag === undefined || record.lowTimeFlag === null || record.extraTimeFlag === null)) {
           const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
-          
+
           // Check for half-day leave
           const hasHalfDay = await LeaveRequest.findOne({
             userId: record.userId,
@@ -371,10 +395,10 @@ export const getEmployeeStats = async (req, res) => {
           await record.save();
         }
       }
-      
+
       const presentDays = records.length;
       const totalWorkedSeconds = records.reduce((acc, r) => acc + r.totalWorkedSeconds, 0);
-      
+
       const lowTimeCount = records.filter(r => r.lowTimeFlag).length;
       const extraTimeCount = records.filter(r => r.extraTimeFlag).length;
 
