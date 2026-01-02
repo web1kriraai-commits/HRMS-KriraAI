@@ -50,6 +50,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  guardianMobileNumber: {
+    type: String,
+    trim: true
+  },
   isActive: {
     type: Boolean,
     default: true
@@ -88,14 +92,56 @@ const userSchema = new mongoose.Schema({
       required: true,
       trim: true
     },
+    endDate: {
+      type: String, // Bond end date in dd-mm-yyyy format (calculated)
+      trim: true
+    },
     order: {
       type: Number, // Order of bond (1, 2, 3, etc.)
       required: true,
       default: 1
+    }
+  }],
+  salaryBreakdown: [{
+    month: {
+      type: Number, // 1-12
+      required: true
     },
-    salary: {
-      type: Number, // Salary for Job bond or Stipend for Internship bond
+    year: {
+      type: Number,
+      required: true
+    },
+    amount: {
+      type: Number,
+      required: true,
       default: 0
+    },
+    bondType: {
+      type: String,
+      enum: ['Internship', 'Job', 'Other'],
+      required: true
+    },
+    startDate: {
+      type: String, // dd-mm-yyyy format
+      required: true
+    },
+    endDate: {
+      type: String, // dd-mm-yyyy format
+      required: true
+    },
+    isPartialMonth: {
+      type: Boolean,
+      default: false
+    },
+    isPaid: {
+      type: Boolean,
+      default: false
+    },
+    paidAt: {
+      type: Date
+    },
+    paidBy: {
+      type: String // Name of admin/HR who marked it as paid
     }
   }]
 }, {

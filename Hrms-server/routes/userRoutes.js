@@ -7,7 +7,8 @@ import {
   getEmployeeStats,
   deleteUser,
   updateUser,
-  resetAllPaidLeaveAllocation
+  resetAllPaidLeaveAllocation,
+  markSalaryAsPaid
 } from '../controllers/userController.js';
 
 const router = express.Router();
@@ -22,6 +23,7 @@ router.get('/stats/employees', authorize('HR', 'Admin'), getEmployeeStats);
 router.post('/', authorize('HR', 'Admin'), createUser);
 router.put('/:id', authorize('HR', 'Admin'), updateUser);
 router.post('/reset-paid-leave', authorize('Admin'), resetAllPaidLeaveAllocation);
+router.patch('/:userId/salary/:month/:year/payment', authorize('HR', 'Admin'), markSalaryAsPaid);
 router.delete('/:id', authorize('Admin'), deleteUser);
 
 export default router;

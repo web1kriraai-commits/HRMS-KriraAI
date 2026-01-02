@@ -46,22 +46,79 @@ const formatDateToDDMMYYYY = (dateStr) => {
 
 export const createUser = async (req, res) => {
   try {
-    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber } = req.body;
+    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown } = req.body;
     const currentUser = req.user;
 
     // Convert dates to dd-mm-yyyy format if provided
     const formattedJoiningDate = formatDateToDDMMYYYY(joiningDate);
 
-    // Process bonds array
+    // Process bonds array - calculate end dates
     let formattedBonds = [];
     if (bonds && Array.isArray(bonds) && bonds.length > 0) {
-      formattedBonds = bonds.map((bond, index) => ({
-        type: bond.type || 'Job',
-        periodMonths: parseInt(bond.periodMonths) || 0,
-        startDate: formatDateToDDMMYYYY(bond.startDate) || formattedJoiningDate,
-        order: index + 1,
-        salary: bond.salary ? parseFloat(bond.salary) : 0
-      })).filter(bond => bond.periodMonths > 0);
+      formattedBonds = bonds.map((bond, index) => {
+        const periodMonths = parseInt(bond.periodMonths) || 0;
+        if (periodMonths === 0) return null;
+
+        // Calculate bond dates using same logic as salary breakdown
+        const parseDDMMYYYY = (dateStr) => {
+          if (!dateStr) return null;
+          const [day, month, year] = dateStr.split('-').map(Number);
+          return new Date(year, month - 1, day);
+        };
+
+        const getMonthEndDate = (year, month) => {
+          return new Date(year, month, 0);
+        };
+
+        let bondStartDate = bond.startDate || formattedJoiningDate;
+        if (index > 0 && formattedBonds[index - 1]) {
+          // Start from previous bond's end date + 1 day
+          const prevEndDate = parseDDMMYYYY(formattedBonds[index - 1].endDate);
+          if (prevEndDate) {
+            prevEndDate.setDate(prevEndDate.getDate() + 1);
+            bondStartDate = formatDateToDDMMYYYY(prevEndDate.toISOString().split('T')[0]);
+          }
+        }
+
+        // Calculate end date: last day of the month after adding periodMonths
+        const startDateObj = parseDDMMYYYY(bondStartDate);
+        if (!startDateObj) return null;
+
+        // Get the month and year for the end of the bond period
+        const startMonth = startDateObj.getMonth();
+        const startYear = startDateObj.getFullYear();
+
+        // Calculate end month and year (subtract 1 because we want the last day of the month before the next period starts)
+        const totalMonths = startMonth + periodMonths - 1;
+        const endMonth = totalMonths % 12;
+        const endYear = startYear + Math.floor(totalMonths / 12);
+
+        // Get last day of the end month
+        const endDateObj = getMonthEndDate(endYear, endMonth + 1);
+        const bondEndDate = formatDateToDDMMYYYY(endDateObj.toISOString().split('T')[0]);
+
+        return {
+          type: bond.type || 'Job',
+          periodMonths: periodMonths,
+          startDate: bondStartDate,
+          endDate: bondEndDate,
+          order: index + 1
+        };
+      }).filter(bond => bond !== null);
+    }
+
+    // Process salary breakdown array
+    let formattedSalaryBreakdown = [];
+    if (salaryBreakdown && Array.isArray(salaryBreakdown) && salaryBreakdown.length > 0) {
+      formattedSalaryBreakdown = salaryBreakdown.map(item => ({
+        month: parseInt(item.month),
+        year: parseInt(item.year),
+        amount: parseFloat(item.amount) || 0,
+        bondType: item.bondType,
+        startDate: formatDateToDDMMYYYY(item.startDate),
+        endDate: formatDateToDDMMYYYY(item.endDate),
+        isPartialMonth: item.isPartialMonth || false
+      }));
     }
 
     if (!name || !username || !email || !role || !department) {
@@ -99,13 +156,18 @@ export const createUser = async (req, res) => {
       isActive: true,
       joiningDate: formattedJoiningDate,
       bonds: formattedBonds,
+      salaryBreakdown: formattedSalaryBreakdown,
       aadhaarNumber: aadhaarNumber || undefined,
       guardianName: guardianName || undefined,
-      mobileNumber: mobileNumber || undefined
+      mobileNumber: mobileNumber || undefined,
+      guardianMobileNumber: guardianMobileNumber || undefined,
+      paidLeaveAllocation: 0,
     });
 
     try {
       await user.save();
+      console.log('User created successfully');
+      console.log('Saved salaryBreakdown count:', user.salaryBreakdown?.length || 0);
     } catch (saveError) {
       // If it's a duplicate key error (MongoDB unique index), drop indexes and retry
       if (saveError.code === 11000) {
@@ -214,7 +276,7 @@ export const deleteUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { paidLeaveAllocation, joiningDate, bonds, name, email, department, aadhaarNumber, guardianName, mobileNumber } = req.body;
+    const { name, email, department, paidLeaveAllocation, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, password } = req.body;
     const currentUser = req.user;
 
     // Only Admin and HR can update users
@@ -244,6 +306,15 @@ export const updateUser = async (req, res) => {
       user.name = name.trim();
     }
 
+    // Update password if provided (will be hashed by pre-save hook)
+    if (password !== undefined && password.trim() !== '') {
+      if (password.length < 4) {
+        return res.status(400).json({ message: 'Password must be at least 4 characters' });
+      }
+      user.password = password;
+      user.isFirstLogin = false; // Reset first login flag if admin manually sets password
+    }
+
     // Update email if provided
     if (email !== undefined && email.trim() !== '') {
       user.email = email.trim().toLowerCase();
@@ -269,6 +340,11 @@ export const updateUser = async (req, res) => {
       user.mobileNumber = mobileNumber.trim() || undefined;
     }
 
+    // Update guardian mobile number if provided
+    if (guardianMobileNumber !== undefined) {
+      user.guardianMobileNumber = guardianMobileNumber.trim() || undefined;
+    }
+
     // Update paid leave allocation - ADD to existing allocation
     if (paidLeaveAllocation !== undefined) {
       const allocation = parseInt(paidLeaveAllocation);
@@ -289,13 +365,79 @@ export const updateUser = async (req, res) => {
 
     // Update bonds if provided
     if (bonds !== undefined && Array.isArray(bonds)) {
-      user.bonds = bonds.map((bond, index) => ({
-        type: bond.type || 'Job',
-        periodMonths: parseInt(bond.periodMonths) || 0,
-        startDate: formatDateToDDMMYYYY(bond.startDate) || user.joiningDate,
-        order: index + 1,
-        salary: bond.salary ? parseFloat(bond.salary) : 0
-      })).filter(bond => bond.periodMonths > 0);
+      user.bonds = bonds.map((bond, index) => {
+        const periodMonths = parseInt(bond.periodMonths) || 0;
+        if (periodMonths === 0) return null;
+
+        const parseDDMMYYYY = (dateStr) => {
+          if (!dateStr) return null;
+          const [day, month, year] = dateStr.split('-').map(Number);
+          return new Date(year, month - 1, day);
+        };
+
+        const getMonthEndDate = (year, month) => {
+          return new Date(year, month, 0);
+        };
+
+        let bondStartDate = formatDateToDDMMYYYY(bond.startDate) || user.joiningDate;
+        if (index > 0 && user.bonds[index - 1]) {
+          // Start from previous bond's end date + 1 day
+          const prevEndDate = parseDDMMYYYY(user.bonds[index - 1].endDate);
+          if (prevEndDate) {
+            prevEndDate.setDate(prevEndDate.getDate() + 1);
+            bondStartDate = formatDateToDDMMYYYY(prevEndDate.toISOString().split('T')[0]);
+          }
+        }
+
+        // Calculate end date: last day of the month after adding periodMonths
+        const startDateObj = parseDDMMYYYY(bondStartDate);
+        if (!startDateObj) return null;
+
+        // Get the month and year for the end of the bond period
+        const startMonth = startDateObj.getMonth();
+        const startYear = startDateObj.getFullYear();
+
+        // Calculate end month and year (subtract 1 because we want the last day of the month before the next period starts)
+        const totalMonths = startMonth + periodMonths - 1;
+        const endMonth = totalMonths % 12;
+        const endYear = startYear + Math.floor(totalMonths / 12);
+
+        // Get last day of the end month
+        const endDateObj = getMonthEndDate(endYear, endMonth + 1);
+        const bondEndDate = formatDateToDDMMYYYY(endDateObj.toISOString().split('T')[0]);
+
+        return {
+          type: bond.type || 'Job',
+          periodMonths: periodMonths,
+          startDate: bondStartDate,
+          endDate: bondEndDate,
+          order: index + 1
+        };
+      }).filter(bond => bond !== null);
+    }
+
+    // Update salary breakdown if provided
+    if (salaryBreakdown !== undefined && Array.isArray(salaryBreakdown)) {
+      user.salaryBreakdown = salaryBreakdown.map(item => {
+        // Find existing entry to preserve payment status
+        const existingEntry = user.salaryBreakdown.find(
+          entry => entry.month === parseInt(item.month) && entry.year === parseInt(item.year)
+        );
+
+        return {
+          month: parseInt(item.month),
+          year: parseInt(item.year),
+          amount: parseFloat(item.amount) || 0,
+          bondType: item.bondType,
+          startDate: formatDateToDDMMYYYY(item.startDate),
+          endDate: formatDateToDDMMYYYY(item.endDate),
+          isPartialMonth: item.isPartialMonth || false,
+          // Preserve payment status from existing entry if available
+          isPaid: existingEntry ? existingEntry.isPaid : false,
+          paidAt: existingEntry ? existingEntry.paidAt : undefined,
+          paidBy: existingEntry ? existingEntry.paidBy : undefined
+        };
+      });
     }
 
     await user.save();
@@ -308,7 +450,8 @@ export const updateUser = async (req, res) => {
       bonds: user.bonds,
       aadhaarNumber: user.aadhaarNumber,
       guardianName: user.guardianName,
-      mobileNumber: user.mobileNumber
+      mobileNumber: user.mobileNumber,
+      guardianMobileNumber: user.guardianMobileNumber
     });
 
     await logAction(
@@ -436,6 +579,64 @@ export const getEmployeeStats = async (req, res) => {
     res.json(stats);
   } catch (error) {
     console.error('Get employee stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Mark salary as paid for a specific month
+export const markSalaryAsPaid = async (req, res) => {
+  try {
+    const { userId, month, year } = req.params;
+    const { isPaid } = req.body;
+    const currentUser = req.user;
+
+    // Only Admin and HR can mark salary as paid
+    if (currentUser.role !== 'Admin' && currentUser.role !== 'HR') {
+      return res.status(403).json({ message: 'Only Admin and HR can mark salary as paid' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Find the salary breakdown entry for the specified month and year
+    const salaryEntry = user.salaryBreakdown.find(
+      item => item.month === parseInt(month) && item.year === parseInt(year)
+    );
+
+    if (!salaryEntry) {
+      return res.status(404).json({ message: 'Salary entry not found for the specified month' });
+    }
+
+    // Update payment status
+    salaryEntry.isPaid = isPaid;
+    if (isPaid) {
+      salaryEntry.paidAt = new Date();
+      salaryEntry.paidBy = currentUser.name;
+    } else {
+      salaryEntry.paidAt = undefined;
+      salaryEntry.paidBy = undefined;
+    }
+
+    await user.save();
+
+    // Log action
+    await logAction(
+      currentUser._id,
+      currentUser.name,
+      isPaid ? 'MARK_SALARY_PAID' : 'UNMARK_SALARY_PAID',
+      'USER',
+      userId,
+      `${isPaid ? 'Marked' : 'Unmarked'} salary as paid for ${user.name} - ${month}/${year}`
+    );
+
+    res.json({
+      message: `Salary ${isPaid ? 'marked as paid' : 'unmarked'} successfully`,
+      salaryEntry
+    });
+  } catch (error) {
+    console.error('Mark salary as paid error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };

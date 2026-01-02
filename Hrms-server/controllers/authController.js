@@ -1,4 +1,14 @@
 import jwt from 'jsonwebtoken';
+import nodemailer from 'nodemailer';
+
+// Configure Nodemailer transporter
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: 'hrms.noreply12@gmail.com',
+    pass: 'xtxk grzz orua uqcu'
+  }
+});
 import User from '../models/User.js';
 import { generateOTP, storeOTP, verifyOTP } from '../utils/otpStorage.js';
 import { sendNotification } from './notificationController.js';
@@ -36,8 +46,13 @@ export const login = async (req, res) => {
       return res.status(401).json({ message: 'Account is inactive' });
     }
 
+    console.log('Login attempt for user:', user.username, 'isFirstLogin:', user.isFirstLogin);
+    console.log('Password provided:', password);
+
     // Verify password
     const isMatch = await user.comparePassword(password);
+    console.log('Password match result:', isMatch);
+
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
@@ -255,3 +270,118 @@ export const resetPassword = async (req, res) => {
   }
 };
 
+// Send OTP for Admin Login
+export const sendAdminLoginOTP = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email || !email.trim()) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+
+    // Verify email belongs to an active Admin
+    const admin = await User.findOne({
+      email: emailLower,
+      role: 'Admin',
+      isActive: true
+    });
+
+    if (!admin) {
+      return res.status(403).json({ message: 'Access denied. This email does not belong to an active Admin account.' });
+    }
+
+    // Generate OTP
+    const otp = generateOTP();
+
+    // Store OTP (using 'admin-login' as context or handle in verify)
+    // We can reuse storeOTP but we need to handle the 'newPassword' argument. 
+    // For login only, we can pass null or a dummy value for newPassword.
+    storeOTP(emailLower, otp, admin.username, 'ADMIN_LOGIN_FLOW');
+
+    // Send Email
+    const mailOptions = {
+      from: 'KriraAI HRMS <hrms.noreply12@gmail.com>',
+      to: emailLower,
+      subject: 'Admin Login OTP - KriraAI HRMS',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #4F46E5;">Admin Login Verification</h2>
+          <p>Hello ${admin.name},</p>
+          <p>You requested to login to the HRMS Admin Dashboard via OTP.</p>
+          <div style="background-color: #F3F4F6; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+            <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1F2937;">${otp}</span>
+          </div>
+          <p>This OTP is valid for 10 minutes.</p>
+          <p style="color: #6B7280; font-size: 14px; margin-top: 30px;">If you didn't request this, please ignore this email.</p>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`Admin Login OTP sent to ${emailLower}`);
+
+    res.json({ message: 'OTP sent to your email address.' });
+
+  } catch (error) {
+    console.error('Send Admin OTP error:', error);
+    res.status(500).json({ message: 'Failed to send OTP. Please try again.' });
+  }
+};
+
+// Verify Admin Login OTP
+export const verifyAdminLoginOTP = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ message: 'Email and OTP are required' });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+
+    // Verify OTP
+    const otpVerification = verifyOTP(emailLower, otp.trim());
+
+    if (!otpVerification.valid) {
+      return res.status(400).json({ message: otpVerification.message });
+    }
+
+    // Find Admin User
+    const user = await User.findOne({ email: emailLower, role: 'Admin', isActive: true });
+
+    if (!user) {
+      return res.status(404).json({ message: 'Admin user not found' });
+    }
+
+    // Update last login
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Generate Token
+    const token = generateToken(user._id);
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        department: user.department,
+        isActive: user.isActive,
+        isFirstLogin: user.isFirstLogin,
+        lastLogin: user.lastLogin,
+        aadhaarNumber: user.aadhaarNumber,
+        guardianName: user.guardianName,
+        mobileNumber: user.mobileNumber
+      }
+    });
+
+  } catch (error) {
+    console.error('Verify Admin OTP error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
