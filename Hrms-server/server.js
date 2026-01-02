@@ -41,7 +41,17 @@ mongoose.connection.on('connected', async () => {
 });
 
 // Middleware
-app.use(cors());
+const corsOptions = {
+  origin: [
+    'http://localhost:3003',
+    'http://localhost:3002',
+    'http://82.112.226.75:3003',
+    'http://82.112.226.75:3002'
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
