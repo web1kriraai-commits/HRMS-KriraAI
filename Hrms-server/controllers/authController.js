@@ -7,6 +7,9 @@ const transporter = nodemailer.createTransport({
   auth: {
     user: 'hrms.noreply12@gmail.com',
     pass: 'xtxk grzz orua uqcu'
+  },
+  tls: {
+    rejectUnauthorized: false // Accept self-signed certificates
   }
 });
 import User from '../models/User.js';
