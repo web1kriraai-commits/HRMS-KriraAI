@@ -5,6 +5,7 @@ import {
   clockOut,
   startBreak,
   endBreak,
+  cancelBreak,
   getTodayAttendance,
   getAttendanceHistory,
   adminUpdateAttendance,
@@ -23,6 +24,7 @@ router.post('/clock-in', clockIn);
 router.post('/clock-out', clockOut);
 router.post('/break/start', startBreak);
 router.post('/break/end', endBreak);
+router.post('/break/cancel', cancelBreak);
 router.get('/today', getTodayAttendance);
 router.get('/history', getAttendanceHistory);
 

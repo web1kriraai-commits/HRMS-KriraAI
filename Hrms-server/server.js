@@ -3,6 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import connectDB from './config/database.js';
+import cron from 'node-cron';
+import Attendance from './models/Attendance.js';
+import LeaveRequest from './models/LeaveRequest.js';
+import { getFlags } from './utils/attendanceUtils.js';
 
 // Import routes
 import authRoutes from './routes/authRoutes.js';
@@ -189,5 +193,94 @@ app.listen(PORT, async () => {
 
   scheduleAutoAddSundays();
   console.log('Sunday auto-add scheduled to run daily at midnight');
+
+  // Schedule auto-checkout for paused users at 11 PM
+  cron.schedule('0 23 * * *', async () => {
+    console.log('Running 11 PM auto-checkout job...');
+    try {
+      const today = new Date().toISOString().split('T')[0];
+
+      // Find all attendance records for today that are checked in but NOT checked out
+      const attendances = await Attendance.find({
+        date: today,
+        checkIn: { $exists: true },
+        checkOut: { $exists: false }
+      });
+
+      for (const record of attendances) {
+        // Check if there is an active break (start but no end)
+        const activeBreak = record.breaks.find(b => b.start && !b.end);
+
+        if (activeBreak) {
+          console.log(`Auto-checking out user ${record.userId} who is paused since ${activeBreak.start}`);
+
+          // Set checkout time to the break start time
+          record.checkOut = activeBreak.start;
+
+          // Close the active break properly (effectively 0 duration session if we want, or just end it at same time)
+          activeBreak.end = activeBreak.start;
+          activeBreak.durationSeconds = 0;
+
+          // Calculate worked seconds
+          // Need to import calculateWorkedSeconds logic or duplicate simple logic here
+          // Duplicating simple logic to avoid dependency issues if utils not exported
+          // Actually, let's keep it robust: Check utils
+          // Assuming simple logic: Total checkout - checkin - breaks
+
+          const checkInTime = new Date(record.checkIn).getTime();
+          const checkOutTime = new Date(record.checkOut).getTime();
+          const totalSession = Math.max(0, (checkOutTime - checkInTime) / 1000);
+
+          const totalBreaks = record.breaks.reduce((acc, b) => {
+            if (b.start && b.end) {
+              return acc + Math.max(0, (new Date(b.end).getTime() - new Date(b.start).getTime()) / 1000);
+            }
+            return acc;
+          }, 0);
+
+          record.totalWorkedSeconds = Math.max(0, totalSession - totalBreaks);
+
+          // Calculate flags logic using getFlags utility
+          const worked = record.totalWorkedSeconds;
+
+          // Check for half-day
+          const hasHalfDay = await LeaveRequest.findOne({
+            userId: record.userId,
+            startDate: record.date,
+            category: 'Half Day Leave',
+            status: 'Approved'
+          });
+
+          // Check for Extra Time Leave
+          let extraTimeLeaveMinutes = 0;
+          const extraTimeLeave = await LeaveRequest.findOne({
+            userId: record.userId,
+            startDate: record.date,
+            category: 'Extra Time Leave',
+            status: 'Approved'
+          });
+
+          if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+            const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+            const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+            const startMinutes = startH * 60 + startM;
+            const endMinutes = endH * 60 + endM;
+            extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+          }
+
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
+
+          record.lowTimeFlag = flags.lowTime;
+          record.extraTimeFlag = flags.extraTime;
+
+          await record.save();
+          console.log(`User ${record.userId} auto-checked out. worked: ${record.totalWorkedSeconds}s`);
+        }
+      }
+    } catch (error) {
+      console.error('Error in 11 PM auto-checkout job:', error);
+    }
+  });
+  console.log('Auto-checkout job scheduled for 23:00 daily');
 });
 

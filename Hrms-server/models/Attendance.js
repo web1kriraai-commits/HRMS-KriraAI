@@ -10,7 +10,7 @@ const breakSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['Standard', 'Extra'],
+    enum: ['Standard', 'Extra', 'Pause'],
     default: 'Standard'
   },
   durationSeconds: {

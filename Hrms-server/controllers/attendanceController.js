@@ -62,11 +62,30 @@ export const clockOut = async (req, res) => {
     const hasHalfDay = await LeaveRequest.findOne({
       userId,
       startDate: today,
-      category: 'Half Day',
+      category: 'Half Day Leave',
       status: 'Approved'
     });
 
-    const { lowTime, extraTime } = getFlags(worked, !!hasHalfDay);
+    // Check for Extra Time Leave and calculate the hours
+    // This allows: 1 hour leave + 7:15 work = 8:15 (normal time)
+    let extraTimeLeaveMinutes = 0;
+    const extraTimeLeave = await LeaveRequest.findOne({
+      userId,
+      startDate: today,
+      category: 'Extra Time Leave',
+      status: 'Approved'
+    });
+
+    if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+      // Calculate duration from startTime and endTime (format: "HH:mm")
+      const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+      const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+      const startMinutes = startH * 60 + startM;
+      const endMinutes = endH * 60 + endM;
+      extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+    }
+
+    const { lowTime, extraTime } = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
 
     attendance.totalWorkedSeconds = worked;
     attendance.lowTimeFlag = lowTime;
@@ -158,6 +177,32 @@ export const endBreak = async (req, res) => {
   }
 };
 
+export const cancelBreak = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const today = getTodayStr();
+
+    const attendance = await Attendance.findOne({ userId, date: today });
+    if (!attendance) {
+      return res.status(400).json({ message: 'No attendance record found' });
+    }
+
+    const activeBreakIndex = attendance.breaks.findIndex(b => !b.end);
+    if (activeBreakIndex === -1) {
+      return res.status(400).json({ message: 'No active break found to cancel' });
+    }
+
+    // Remove the active break entirely
+    attendance.breaks.splice(activeBreakIndex, 1);
+
+    await attendance.save();
+    res.json(attendance);
+  } catch (error) {
+    console.error('Cancel break error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 export const getTodayAttendance = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -191,7 +236,7 @@ export const getAttendanceHistory = async (req, res) => {
     for (const record of attendance) {
       if (record.checkIn && record.checkOut && (record.lowTimeFlag === undefined || record.extraTimeFlag === undefined || record.lowTimeFlag === null || record.extraTimeFlag === null)) {
         const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
-        
+
         // Check for half-day leave
         const hasHalfDay = await LeaveRequest.findOne({
           userId: record.userId,
@@ -226,26 +271,26 @@ export const adminCreateAttendance = async (req, res) => {
 
     // Check if record exists
     let attendance = await Attendance.findOne({ userId, date });
-    
+
     if (attendance) {
       // Update existing record
       const beforeData = JSON.stringify(attendance.toObject());
 
       // Parse time strings and combine with date
       const baseDate = new Date(date);
-      
+
       if (checkIn) {
         // Handle time format like "09:00" or "09:00 AM"
         let timeStr = checkIn.trim();
         let hours, minutes;
-        
+
         if (timeStr.includes('AM') || timeStr.includes('PM')) {
           // 12-hour format
           const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
           const [h, m] = timePart.split(':');
           hours = parseInt(h, 10);
           minutes = parseInt(m || '0', 10);
-          
+
           if (period.toUpperCase() === 'PM' && hours !== 12) {
             hours += 12;
           } else if (period.toUpperCase() === 'AM' && hours === 12) {
@@ -257,23 +302,23 @@ export const adminCreateAttendance = async (req, res) => {
           hours = parseInt(h, 10);
           minutes = parseInt(m || '0', 10);
         }
-        
+
         attendance.checkIn = new Date(baseDate);
         attendance.checkIn.setHours(hours, minutes, 0, 0);
       }
-      
+
       if (checkOut) {
         // Handle time format like "18:00" or "06:00 PM"
         let timeStr = checkOut.trim();
         let hours, minutes;
-        
+
         if (timeStr.includes('AM') || timeStr.includes('PM')) {
           // 12-hour format
           const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
           const [h, m] = timePart.split(':');
           hours = parseInt(h, 10);
           minutes = parseInt(m || '0', 10);
-          
+
           if (period.toUpperCase() === 'PM' && hours !== 12) {
             hours += 12;
           } else if (period.toUpperCase() === 'AM' && hours === 12) {
@@ -285,11 +330,11 @@ export const adminCreateAttendance = async (req, res) => {
           hours = parseInt(h, 10);
           minutes = parseInt(m || '0', 10);
         }
-        
+
         attendance.checkOut = new Date(baseDate);
         attendance.checkOut.setHours(hours, minutes, 0, 0);
       }
-      
+
       if (notes !== undefined) attendance.notes = notes;
 
       if (breakDurationMinutes !== undefined) {
@@ -307,10 +352,28 @@ export const adminCreateAttendance = async (req, res) => {
         const hasHalfDay = await LeaveRequest.findOne({
           userId: attendance.userId,
           startDate: attendance.date,
-          category: 'Half Day',
+          category: 'Half Day Leave',
           status: 'Approved'
         });
-        const flags = getFlags(worked, !!hasHalfDay);
+
+        // Check for Extra Time Leave
+        let extraTimeLeaveMinutes = 0;
+        const extraTimeLeave = await LeaveRequest.findOne({
+          userId: attendance.userId,
+          startDate: attendance.date,
+          category: 'Extra Time Leave',
+          status: 'Approved'
+        });
+
+        if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+          const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+          const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+          const startMinutes = startH * 60 + startM;
+          const endMinutes = endH * 60 + endM;
+          extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+        }
+
+        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
         attendance.totalWorkedSeconds = worked;
         attendance.lowTimeFlag = flags.lowTime;
         attendance.extraTimeFlag = flags.extraTime;
@@ -342,14 +405,14 @@ export const adminCreateAttendance = async (req, res) => {
       // Handle time format like "09:00" or "09:00 AM"
       let timeStr = checkIn.trim();
       let hours, minutes;
-      
+
       if (timeStr.includes('AM') || timeStr.includes('PM')) {
         // 12-hour format
         const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
         const [h, m] = timePart.split(':');
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
-        
+
         if (period.toUpperCase() === 'PM' && hours !== 12) {
           hours += 12;
         } else if (period.toUpperCase() === 'AM' && hours === 12) {
@@ -361,7 +424,7 @@ export const adminCreateAttendance = async (req, res) => {
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
       }
-      
+
       checkInDate = new Date(baseDate);
       checkInDate.setHours(hours, minutes, 0, 0);
     }
@@ -370,14 +433,14 @@ export const adminCreateAttendance = async (req, res) => {
       // Handle time format like "18:00" or "06:00 PM"
       let timeStr = checkOut.trim();
       let hours, minutes;
-      
+
       if (timeStr.includes('AM') || timeStr.includes('PM')) {
         // 12-hour format
         const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
         const [h, m] = timePart.split(':');
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
-        
+
         if (period.toUpperCase() === 'PM' && hours !== 12) {
           hours += 12;
         } else if (period.toUpperCase() === 'AM' && hours === 12) {
@@ -389,7 +452,7 @@ export const adminCreateAttendance = async (req, res) => {
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
       }
-      
+
       checkOutDate = new Date(baseDate);
       checkOutDate.setHours(hours, minutes, 0, 0);
     }
@@ -421,10 +484,28 @@ export const adminCreateAttendance = async (req, res) => {
       const hasHalfDay = await LeaveRequest.findOne({
         userId,
         startDate: date,
-        category: 'Half Day',
+        category: 'Half Day Leave',
         status: 'Approved'
       });
-      const flags = getFlags(worked, !!hasHalfDay);
+
+      // Check for Extra Time Leave
+      let extraTimeLeaveMinutes = 0;
+      const extraTimeLeave = await LeaveRequest.findOne({
+        userId,
+        startDate: date,
+        category: 'Extra Time Leave',
+        status: 'Approved'
+      });
+
+      if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+        const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+        const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+        const startMinutes = startH * 60 + startM;
+        const endMinutes = endH * 60 + endM;
+        extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+      }
+
+      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
       attendance.totalWorkedSeconds = worked;
       attendance.lowTimeFlag = flags.lowTime;
       attendance.extraTimeFlag = flags.extraTime;
@@ -462,19 +543,19 @@ export const adminUpdateAttendance = async (req, res) => {
 
     // Parse time strings and combine with date
     const baseDate = new Date(attendance.date);
-    
+
     if (checkIn) {
       // Handle time format like "09:00" or "09:00 AM"
       let timeStr = checkIn.trim();
       let hours, minutes;
-      
+
       if (timeStr.includes('AM') || timeStr.includes('PM')) {
         // 12-hour format
         const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
         const [h, m] = timePart.split(':');
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
-        
+
         if (period.toUpperCase() === 'PM' && hours !== 12) {
           hours += 12;
         } else if (period.toUpperCase() === 'AM' && hours === 12) {
@@ -486,23 +567,23 @@ export const adminUpdateAttendance = async (req, res) => {
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
       }
-      
+
       attendance.checkIn = new Date(baseDate);
       attendance.checkIn.setHours(hours, minutes, 0, 0);
     }
-    
+
     if (checkOut) {
       // Handle time format like "18:00" or "06:00 PM"
       let timeStr = checkOut.trim();
       let hours, minutes;
-      
+
       if (timeStr.includes('AM') || timeStr.includes('PM')) {
         // 12-hour format
         const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
         const [h, m] = timePart.split(':');
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
-        
+
         if (period.toUpperCase() === 'PM' && hours !== 12) {
           hours += 12;
         } else if (period.toUpperCase() === 'AM' && hours === 12) {
@@ -514,11 +595,11 @@ export const adminUpdateAttendance = async (req, res) => {
         hours = parseInt(h, 10);
         minutes = parseInt(m || '0', 10);
       }
-      
+
       attendance.checkOut = new Date(baseDate);
       attendance.checkOut.setHours(hours, minutes, 0, 0);
     }
-    
+
     if (notes !== undefined) attendance.notes = notes;
 
     // Override breaks if provided
@@ -535,15 +616,32 @@ export const adminUpdateAttendance = async (req, res) => {
     // Recalculate if both checkIn and checkOut exist
     if (attendance.checkIn && attendance.checkOut) {
       const worked = calculateWorkedSeconds(attendance);
-      
+
       const hasHalfDay = await LeaveRequest.findOne({
         userId: attendance.userId,
         startDate: attendance.date,
-        category: 'Half Day',
+        category: 'Half Day Leave',
         status: 'Approved'
       });
 
-      const flags = getFlags(worked, !!hasHalfDay);
+      // Check for Extra Time Leave
+      let extraTimeLeaveMinutes = 0;
+      const extraTimeLeave = await LeaveRequest.findOne({
+        userId: attendance.userId,
+        startDate: attendance.date,
+        category: 'Extra Time Leave',
+        status: 'Approved'
+      });
+
+      if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+        const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+        const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+        const startMinutes = startH * 60 + startM;
+        const endMinutes = endH * 60 + endM;
+        extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+      }
+
+      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
       attendance.totalWorkedSeconds = worked;
       attendance.lowTimeFlag = flags.lowTime;
       attendance.extraTimeFlag = flags.extraTime;
@@ -586,20 +684,37 @@ export const getAllAttendance = async (req, res) => {
       .sort({ date: -1 })
       .limit(1000);
 
-    // Recalculate flags for records that have checkIn and checkOut but might be missing flags
+    // Recalculate flags for records that have checkIn and checkOut
     for (const record of attendance) {
-      if (record.checkIn && record.checkOut && (record.lowTimeFlag === undefined || record.extraTimeFlag === undefined || record.lowTimeFlag === null || record.extraTimeFlag === null)) {
+      if (record.checkIn && record.checkOut) {
         const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
-        
+
         // Check for half-day leave
         const hasHalfDay = await LeaveRequest.findOne({
           userId: record.userId,
           startDate: record.date,
-          category: 'Half Day',
+          category: 'Half Day Leave',
           status: 'Approved'
         });
 
-        const flags = getFlags(worked, !!hasHalfDay);
+        // Check for Extra Time Leave
+        let extraTimeLeaveMinutes = 0;
+        const extraTimeLeave = await LeaveRequest.findOne({
+          userId: record.userId,
+          startDate: record.date,
+          category: 'Extra Time Leave',
+          status: 'Approved'
+        });
+
+        if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+          const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+          const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+          const startMinutes = startH * 60 + startM;
+          const endMinutes = endH * 60 + endM;
+          extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+        }
+
+        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
         record.totalWorkedSeconds = worked;
@@ -621,20 +736,37 @@ export const getTodayAllAttendance = async (req, res) => {
       .populate('userId', 'name username email department role')
       .sort({ checkIn: 1 });
 
-    // Recalculate flags for records that have checkIn and checkOut but might be missing flags
+    // Recalculate flags for records that have checkIn and checkOut
     for (const record of attendance) {
-      if (record.checkIn && record.checkOut && (record.lowTimeFlag === undefined || record.extraTimeFlag === undefined || record.lowTimeFlag === null || record.extraTimeFlag === null)) {
+      if (record.checkIn && record.checkOut) {
         const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
-        
+
         // Check for half-day leave
         const hasHalfDay = await LeaveRequest.findOne({
           userId: record.userId,
           startDate: record.date,
-          category: 'Half Day',
+          category: 'Half Day Leave',
           status: 'Approved'
         });
 
-        const flags = getFlags(worked, !!hasHalfDay);
+        // Check for Extra Time Leave
+        let extraTimeLeaveMinutes = 0;
+        const extraTimeLeave = await LeaveRequest.findOne({
+          userId: record.userId,
+          startDate: record.date,
+          category: 'Extra Time Leave',
+          status: 'Approved'
+        });
+
+        if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+          const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+          const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+          const startMinutes = startH * 60 + startM;
+          const endMinutes = endH * 60 + endM;
+          extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+        }
+
+        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
         record.totalWorkedSeconds = worked;

@@ -276,8 +276,10 @@ export const deleteUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, email, department, paidLeaveAllocation, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, password } = req.body;
+    const { name, email, department, paidLeaveAllocation, paidLeaveAction, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, password } = req.body;
     const currentUser = req.user;
+
+    console.log(`Update user ${id} request:`, { paidLeaveAllocation, paidLeaveAction, bodyAction: req.body.paidLeaveAction });
 
     // Only Admin and HR can update users
     if (currentUser.role !== 'Admin' && currentUser.role !== 'HR') {
@@ -345,15 +347,30 @@ export const updateUser = async (req, res) => {
       user.guardianMobileNumber = guardianMobileNumber.trim() || undefined;
     }
 
-    // Update paid leave allocation - ADD to existing allocation
+    // Update paid leave allocation
+    // If paidLeaveAction is 'set', we overwrite the value (for Edit User)
+    // If paidLeaveAction is 'add' (or undefined), we add to existing (for Granting Leave)
     if (paidLeaveAllocation !== undefined) {
       const allocation = parseInt(paidLeaveAllocation);
       if (isNaN(allocation) || allocation < 0) {
         return res.status(400).json({ message: 'Paid leave allocation must be a positive number' });
       }
-      // Add to existing allocation (default to 0 if null/undefined)
-      const currentAllocation = user.paidLeaveAllocation || 0;
-      user.paidLeaveAllocation = currentAllocation + allocation;
+
+      console.log(`Processing paid leave update: allocation=${allocation}, action=${paidLeaveAction}`);
+
+      // Check for 'add' action explicitly (case insensitive)
+      const isAddAction = paidLeaveAction && String(paidLeaveAction).trim().toLowerCase() === 'add';
+
+      if (isAddAction) {
+        // Add to existing
+        const currentAllocation = user.paidLeaveAllocation || 0;
+        user.paidLeaveAllocation = currentAllocation + allocation;
+      } else {
+        // Default to SET (Overwrite) - This fixes the bug where values were summing up unwantedly
+        // if the action flag was missing or undefined.
+        user.paidLeaveAllocation = allocation;
+      }
+
       // Update last allocation date
       user.paidLeaveLastAllocatedDate = new Date();
     }
@@ -518,20 +535,37 @@ export const getEmployeeStats = async (req, res) => {
     const stats = await Promise.all(employees.map(async (employee) => {
       const records = await Attendance.find({ userId: employee._id });
 
-      // Recalculate flags for records that have checkIn and checkOut but might be missing flags
+      // Recalculate flags for records that have checkIn and checkOut
       for (const record of records) {
-        if (record.checkIn && record.checkOut && (record.lowTimeFlag === undefined || record.extraTimeFlag === undefined || record.lowTimeFlag === null || record.extraTimeFlag === null)) {
+        if (record.checkIn && record.checkOut) {
           const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
 
           // Check for half-day leave
           const hasHalfDay = await LeaveRequest.findOne({
             userId: record.userId,
             startDate: record.date,
-            category: 'Half Day',
+            category: 'Half Day Leave',
             status: 'Approved'
           });
 
-          const flags = getFlags(worked, !!hasHalfDay);
+          // Check for Extra Time Leave
+          let extraTimeLeaveMinutes = 0;
+          const extraTimeLeave = await LeaveRequest.findOne({
+            userId: record.userId,
+            startDate: record.date,
+            category: 'Extra Time Leave',
+            status: 'Approved'
+          });
+
+          if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+            const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+            const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+            const startMinutes = startH * 60 + startM;
+            const endMinutes = endH * 60 + endM;
+            extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+          }
+
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;
           record.totalWorkedSeconds = worked;
