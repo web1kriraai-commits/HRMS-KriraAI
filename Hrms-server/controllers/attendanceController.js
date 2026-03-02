@@ -265,7 +265,7 @@ export const getAttendanceHistory = async (req, res) => {
         const hasHalfDay = await LeaveRequest.findOne({
           userId: record.userId,
           startDate: record.date,
-          category: 'Half Day',
+          category: 'Half Day Leave',
           status: 'Approved'
         });
 
@@ -989,3 +989,125 @@ export const recalculateHolidayFlags = async (req, res) => {
   }
 };
 
+/**
+ * Migration endpoint: Recalculate lowTimeFlag/extraTimeFlag for ALL attendance records
+ * where a Half Day Leave was approved, using the corrected 240-min (4h) threshold.
+ * Call once: POST /api/attendance/admin/recalculate-halfday-flags  (Admin/HR token)
+ */
+export const recalculateHalfDayFlags = async (req, res) => {
+  try {
+    // Find all approved half-day leaves
+    const halfDayLeaves = await LeaveRequest.find({
+      category: 'Half Day Leave',
+      status: 'Approved'
+    }).lean();
+
+    if (halfDayLeaves.length === 0) {
+      return res.json({ message: 'No approved Half Day Leave records found.', updated: 0 });
+    }
+
+    // Build a lookup: userId+date -> true
+    const halfDaySet = new Set(
+      halfDayLeaves.map(l => `${l.userId.toString()}-${l.startDate}`)
+    );
+
+    // Collect all unique dates from those leaves
+    const leaveDates = [...new Set(halfDayLeaves.map(l => l.startDate))];
+
+    // Fetch all attendance records on those dates that are fully clocked out
+    const records = await Attendance.find({
+      date: { $in: leaveDates },
+      checkIn: { $exists: true, $ne: null },
+      checkOut: { $exists: true, $ne: null }
+    });
+
+    if (records.length === 0) {
+      return res.json({ message: 'No attendance records found for half-day leave dates.', updated: 0 });
+    }
+
+    // Bulk fetch extra time leaves for the same users/dates
+    const allUserIds = [...new Set(records.map(r => (r.userId?._id || r.userId).toString()))];
+    const extraTimeLeaves = await LeaveRequest.find({
+      userId: { $in: allUserIds },
+      startDate: { $in: leaveDates },
+      category: 'Extra Time Leave',
+      status: 'Approved'
+    }).lean();
+    const extraTimeMap = {};
+    for (const l of extraTimeLeaves) {
+      extraTimeMap[`${l.userId.toString()}-${l.startDate}`] = l;
+    }
+
+    // Bulk fetch holidays
+    const allHolidays = await CompanyHoliday.find({ date: { $in: leaveDates } }, 'date').lean();
+    const holidaySet = new Set(allHolidays.map(h => h.date));
+
+    let updatedCount = 0;
+    const saves = [];
+
+    for (const record of records) {
+      // Skip manually-flagged records
+      if (record.isManualFlag) continue;
+
+      const uid = (record.userId?._id || record.userId).toString();
+      const key = `${uid}-${record.date}`;
+      const isHalfDay = halfDaySet.has(key);
+
+      // Only process records that actually had a half-day leave
+      if (!isHalfDay) continue;
+
+      const isHolidayWork = holidaySet.has(record.date);
+      const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+
+      let extraTimeLeaveMinutes = 0;
+      const etLeave = extraTimeMap[key];
+      if (etLeave && etLeave.startTime && etLeave.endTime) {
+        const [startH, startM] = etLeave.startTime.split(':').map(Number);
+        const [endH, endM] = etLeave.endTime.split(':').map(Number);
+        extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
+      }
+
+      const flags = getFlags(worked, true, extraTimeLeaveMinutes, isHolidayWork, record.checkIn);
+      const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
+
+      const changed =
+        record.lowTimeFlag !== flags.lowTime ||
+        record.extraTimeFlag !== flags.extraTime ||
+        record.lateCheckIn !== flags.lateCheckIn ||
+        record.penaltySeconds !== flags.penaltySeconds ||
+        record.totalWorkedSeconds !== adjustedWorked;
+
+      if (changed) {
+        record.lowTimeFlag = flags.lowTime;
+        record.extraTimeFlag = flags.extraTime;
+        record.lateCheckIn = flags.lateCheckIn;
+        record.penaltySeconds = flags.penaltySeconds;
+        record.totalWorkedSeconds = adjustedWorked;
+        saves.push(record.save());
+        updatedCount++;
+      }
+    }
+
+    if (saves.length > 0) {
+      await Promise.all(saves);
+    }
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'RECALCULATE_HALFDAY_FLAGS',
+      'ATTENDANCE',
+      'BULK',
+      `Recalculated half-day leave flags: ${updatedCount} record(s) updated out of ${records.length} checked`
+    );
+
+    res.json({
+      message: `Successfully recalculated half-day leave flags. ${updatedCount} record(s) corrected.`,
+      total: records.length,
+      updated: updatedCount
+    });
+  } catch (error) {
+    console.error('Recalculate half-day flags error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};

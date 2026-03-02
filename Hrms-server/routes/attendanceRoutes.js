@@ -13,7 +13,8 @@ import {
   deleteAttendance,
   getTodayAllAttendance,
   getAllAttendance,
-  recalculateHolidayFlags
+  recalculateHolidayFlags,
+  recalculateHalfDayFlags
 } from '../controllers/attendanceController.js';
 
 const router = express.Router();
@@ -35,6 +36,7 @@ router.get('/all', authorize('HR', 'Admin'), getAllAttendance);
 router.get('/today/all', authorize('HR', 'Admin'), getTodayAllAttendance);
 router.post('/admin-create', authorize('HR', 'Admin'), adminCreateAttendance);
 router.post('/admin/recalculate-holiday-flags', authorize('HR', 'Admin'), recalculateHolidayFlags);
+router.post('/admin/recalculate-halfday-flags', authorize('HR', 'Admin'), recalculateHalfDayFlags);
 router.put('/:recordId', authorize('HR', 'Admin'), adminUpdateAttendance);
 router.delete('/:recordId', authorize('Admin'), deleteAttendance);
 

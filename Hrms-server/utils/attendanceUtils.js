@@ -2,13 +2,13 @@
 // Normal time: 8 hours 15 minutes to 8 hours 22 minutes (495 to 502 minutes)
 // Low Time: worked < 8:15 (< 495 minutes)
 // Extra Time: worked > 8:22 (> 502 minutes)
-// Half-day: threshold is 4 hours 7.5 minutes (half of 8:15)
+// Half-day: normal = 4 hours (240 min) to 4h 11m (251/2 min). Low < 4 hours, Extra > 4h 11m
 // Holiday Work: ALL worked time counts as overtime (extraTime), no lowTime ever
 // Late Check-in Penalty: if checkIn > 09:00 AM, deduct 15 minutes from effective worked time
 
 const MIN_NORMAL_MINUTES = 495; // 8h 15m (lower bound for normal)
 const MAX_NORMAL_MINUTES = 502; // 8h 22m (upper bound for normal)
-const HALF_DAY_THRESHOLD_MINUTES = 247.5; // 4h 7.5m (half of standard)
+const HALF_DAY_THRESHOLD_MINUTES = 240; // 4h 0m (standard half-day duration)
 const LATE_CHECKIN_HOUR = 9; // 9:00 AM cutoff
 export const MIN_LATE_PENALTY_SECONDS = 15 * 60; // 900 seconds = 15 minutes
 const PENALTY_EFFECTIVE_DATE = '2026-02-01'; // Apply to current records
@@ -114,8 +114,8 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
 
   // Use half-day threshold if approved, otherwise use normal range
   if (isHalfDayApproved) {
-    const halfMinNormal = MIN_NORMAL_MINUTES / 2; // 247.5 minutes
-    const halfMaxNormal = MAX_NORMAL_MINUTES / 2; // 251 minutes
+    const halfMinNormal = HALF_DAY_THRESHOLD_MINUTES; // 240 minutes = 4 hours (standard half-day)
+    const halfMaxNormal = MAX_NORMAL_MINUTES / 2;     // ~251 minutes = 4h 11m
     return {
       lowTime: workedMinutes > 0 && workedMinutes < halfMinNormal,
       extraTime: workedMinutes > halfMaxNormal,
