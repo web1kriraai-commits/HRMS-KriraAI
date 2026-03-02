@@ -4,6 +4,7 @@ import {
   addHoliday,
   getHolidays,
   deleteHoliday,
+  updateHoliday,
   autoAddSundaysForMonth
 } from '../controllers/holidayController.js';
 
@@ -26,6 +27,7 @@ router.post('/auto-add-sundays', authenticate, authorize('HR', 'Admin'), async (
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
+router.put('/:id', authenticate, authorize('Admin'), updateHoliday);
 router.delete('/:id', authenticate, authorize('Admin'), deleteHoliday);
 
 export default router;

@@ -20,7 +20,7 @@ export const requestLeave = async (req, res) => {
     const validCategories = ['Paid Leave', 'Unpaid Leave', 'Half Day Leave', 'Extra Time Leave'];
     if (!validCategories.includes(category)) {
       console.error('Invalid category:', category);
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: `Invalid leave category. Must be one of: ${validCategories.join(', ')}`,
         received: category
       });
@@ -29,13 +29,13 @@ export const requestLeave = async (req, res) => {
     // Validate time fields for extra time leave and half day leave
     if (category === 'Extra Time Leave') {
       if (!startTime || !endTime) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: 'Start time and end time are required for Extra Time Leave'
         });
       }
     } else if (category === 'Half Day Leave') {
       if (!startTime) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: 'Start time is required for Half Day Leave'
         });
       }
@@ -82,7 +82,7 @@ export const requestLeave = async (req, res) => {
             validationErrors[key] = saveError.errors[key].message;
           });
         }
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: 'Validation error',
           error: saveError.message,
           details: validationErrors
@@ -103,7 +103,7 @@ export const requestLeave = async (req, res) => {
     try {
       const targetRoles = (user.role === 'HR' || user.role === 'Admin') ? ['Admin'] : ['HR', 'Admin'];
       const approvers = await User.find({ role: { $in: targetRoles }, isActive: true });
-      
+
       for (const approver of approvers) {
         if (approver._id.toString() !== userId.toString()) {
           try {
@@ -122,11 +122,11 @@ export const requestLeave = async (req, res) => {
   } catch (error) {
     console.error('Request leave error:', error);
     console.error('Error stack:', error.stack);
-    
+
     // Return more detailed error message
     const errorMessage = error.message || 'Server error';
     const isValidationError = error.name === 'ValidationError';
-    
+
     // Format validation errors
     let errorDetails = undefined;
     if (isValidationError && error.errors) {
@@ -135,8 +135,8 @@ export const requestLeave = async (req, res) => {
         errorDetails[key] = error.errors[key].message;
       });
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       message: isValidationError ? `Validation error: ${errorMessage}` : `Server error: ${errorMessage}`,
       error: errorMessage,
       details: errorDetails,
@@ -159,7 +159,7 @@ export const getMyLeaves = async (req, res) => {
 export const getLeavesByUserId = async (req, res) => {
   try {
     const { userId } = req.params;
-    
+
     // Verify the userId matches the authenticated user (employees can only see their own)
     // Or allow HR/Admin to see any user's leaves
     if (req.user.role !== 'HR' && req.user.role !== 'Admin' && req.user._id.toString() !== userId) {
@@ -169,7 +169,7 @@ export const getLeavesByUserId = async (req, res) => {
     const leaves = await LeaveRequest.find({ userId })
       .populate('userId', 'name username email department role')
       .sort({ createdAt: -1 });
-    
+
     res.json(leaves);
   } catch (error) {
     console.error('Get leaves by userId error:', error);
@@ -198,7 +198,7 @@ export const updateLeaveStatus = async (req, res) => {
     const { id } = req.params;
     const { status, hrComment } = req.body;
 
-    if (!['Approved', 'Rejected'].includes(status)) {
+    if (!['Approved', 'Rejected', 'Pending', 'Cancelled'].includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
     }
 
@@ -236,6 +236,77 @@ export const updateLeaveStatus = async (req, res) => {
     res.json(leaveRequest);
   } catch (error) {
     console.error('Update leave status error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const adminUpdateLeave = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { startDate, endDate, category, reason, startTime, endTime, hrComment, status } = req.body;
+
+    const leaveRequest = await LeaveRequest.findById(id).populate('userId', 'name');
+    if (!leaveRequest) {
+      return res.status(404).json({ message: 'Leave request not found' });
+    }
+
+    const beforeData = JSON.stringify(leaveRequest.toObject());
+
+    if (startDate) leaveRequest.startDate = startDate;
+    if (endDate) leaveRequest.endDate = endDate;
+    if (category) leaveRequest.category = category;
+    if (reason) leaveRequest.reason = reason;
+    if (startTime !== undefined) leaveRequest.startTime = startTime;
+    if (endTime !== undefined) leaveRequest.endTime = endTime;
+    if (hrComment !== undefined) leaveRequest.hrComment = hrComment;
+    if (status) leaveRequest.status = status;
+
+    await leaveRequest.save();
+    const afterData = JSON.stringify(leaveRequest.toObject());
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'ADMIN_EDIT_LEAVE',
+      'LEAVE',
+      id,
+      `Admin edited leave for ${leaveRequest.userId?.name || 'Unknown'}`,
+      beforeData,
+      afterData
+    );
+
+    res.json(leaveRequest);
+  } catch (error) {
+    console.error('Admin update leave error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const deleteLeave = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const leaveRequest = await LeaveRequest.findById(id).populate('userId', 'name');
+    if (!leaveRequest) {
+      return res.status(404).json({ message: 'Leave request not found' });
+    }
+
+    const employeeName = leaveRequest.userId?.name || 'Unknown';
+    const startDate = leaveRequest.startDate;
+
+    await LeaveRequest.findByIdAndDelete(id);
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'DELETE_LEAVE',
+      'LEAVE',
+      id,
+      `Deleted leave request for ${employeeName} on ${startDate}`
+    );
+
+    res.json({ message: 'Leave request deleted successfully' });
+  } catch (error) {
+    console.error('Delete leave error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };

@@ -57,6 +57,18 @@ const attendanceSchema = new mongoose.Schema({
   },
   notes: {
     type: String
+  },
+  isManualFlag: {
+    type: Boolean,
+    default: false
+  },
+  penaltySeconds: {
+    type: Number,
+    default: 0
+  },
+  lateCheckIn: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true

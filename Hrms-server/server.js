@@ -18,6 +18,7 @@ import notificationRoutes from './routes/notificationRoutes.js';
 import holidayRoutes from './routes/holidayRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
 import reportRoutes from './routes/reportRoutes.js';
+import CompanyHoliday from './models/CompanyHoliday.js';
 
 // Import notification cleanup function
 import { cleanupOldNotifications } from './controllers/notificationController.js';
@@ -60,7 +61,11 @@ app.use(express.urlencoded({ extended: true }));
 
 // Request logger
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.url} ${res.statusCode} (${duration}ms)`);
+  });
   next();
 });
 
@@ -268,7 +273,7 @@ app.listen(PORT, async () => {
             extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
           }
 
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, !!(await CompanyHoliday.findOne({ date: record.date })));
 
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;

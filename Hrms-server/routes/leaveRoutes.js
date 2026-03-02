@@ -5,6 +5,8 @@ import {
   getMyLeaves,
   getAllLeaves,
   updateLeaveStatus,
+  adminUpdateLeave,
+  deleteLeave,
   getPendingLeaves,
   getLeavesByUserId
 } from '../controllers/leaveController.js';
@@ -23,6 +25,8 @@ router.get('/user/:userId', getLeavesByUserId);
 router.get('/all', authorize('HR', 'Admin'), getAllLeaves);
 router.get('/pending', authorize('HR', 'Admin'), getPendingLeaves);
 router.put('/:id/status', authorize('HR', 'Admin'), updateLeaveStatus);
+router.put('/:id', authorize('Admin'), adminUpdateLeave);
+router.delete('/:id', authorize('Admin'), deleteLeave);
 
 export default router;
 

@@ -10,8 +10,10 @@ import {
   getAttendanceHistory,
   adminUpdateAttendance,
   adminCreateAttendance,
+  deleteAttendance,
   getTodayAllAttendance,
-  getAllAttendance
+  getAllAttendance,
+  recalculateHolidayFlags
 } from '../controllers/attendanceController.js';
 
 const router = express.Router();
@@ -32,7 +34,8 @@ router.get('/history', getAttendanceHistory);
 router.get('/all', authorize('HR', 'Admin'), getAllAttendance);
 router.get('/today/all', authorize('HR', 'Admin'), getTodayAllAttendance);
 router.post('/admin-create', authorize('HR', 'Admin'), adminCreateAttendance);
+router.post('/admin/recalculate-holiday-flags', authorize('HR', 'Admin'), recalculateHolidayFlags);
 router.put('/:recordId', authorize('HR', 'Admin'), adminUpdateAttendance);
+router.delete('/:recordId', authorize('Admin'), deleteAttendance);
 
 export default router;
-

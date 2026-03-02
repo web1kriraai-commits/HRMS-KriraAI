@@ -1,7 +1,14 @@
 import Attendance from '../models/Attendance.js';
 import LeaveRequest from '../models/LeaveRequest.js';
+import CompanyHoliday from '../models/CompanyHoliday.js';
 import { calculateWorkedSeconds, getFlags, getTodayStr } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
+
+// Helper: check if a date string (YYYY-MM-DD) is a company holiday
+const checkIsHoliday = async (dateStr) => {
+  const holiday = await CompanyHoliday.findOne({ date: dateStr });
+  return !!holiday;
+};
 
 export const clockIn = async (req, res) => {
   try {
@@ -14,15 +21,21 @@ export const clockIn = async (req, res) => {
       return res.status(400).json({ message: 'Already clocked in today' });
     }
 
+    const now = new Date();
+    const isHoliday = await checkIsHoliday(today);
+    const { lateCheckIn, penaltySeconds } = getFlags(0, false, 0, isHoliday, now);
+
     const attendance = new Attendance({
       userId,
       date: today,
-      checkIn: new Date(),
+      checkIn: now,
       location: req.body.location || 'Office',
       breaks: [],
       totalWorkedSeconds: 0,
       lowTimeFlag: false,
-      extraTimeFlag: false
+      extraTimeFlag: false,
+      lateCheckIn,
+      penaltySeconds
     });
 
     await attendance.save();
@@ -58,6 +71,9 @@ export const clockOut = async (req, res) => {
     attendance.checkOut = new Date();
     const worked = calculateWorkedSeconds(attendance, attendance.checkOut.toISOString());
 
+    // Check if today is a company holiday
+    const isHolidayWork = await checkIsHoliday(today);
+
     // Check for half-day leave
     const hasHalfDay = await LeaveRequest.findOne({
       userId,
@@ -85,14 +101,22 @@ export const clockOut = async (req, res) => {
       extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
     }
 
-    const { lowTime, extraTime } = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
+    const { lowTime, extraTime, lateCheckIn, penaltySeconds } = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn);
 
-    attendance.totalWorkedSeconds = worked;
+    // Store penalty-adjusted worked time so displayed hours already reflect the deduction
+    attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
     attendance.lowTimeFlag = lowTime;
     attendance.extraTimeFlag = extraTime;
+    attendance.penaltySeconds = penaltySeconds;
 
     await attendance.save();
-    await logAction(req.user._id, req.user.name, 'CLOCK_OUT', 'ATTENDANCE', attendance._id.toString(), `Clocked out at ${today}`);
+
+    let logMessage = `Clocked out at ${today}`;
+    if (lateCheckIn) {
+      logMessage += ` (Late Check-in Penalty: ${Math.round(penaltySeconds / 60)} minutes)`;
+    }
+
+    await logAction(req.user._id, req.user.name, 'CLOCK_OUT', 'ATTENDANCE', attendance._id.toString(), logMessage);
 
     res.json(attendance);
   } catch (error) {
@@ -245,10 +269,12 @@ export const getAttendanceHistory = async (req, res) => {
           status: 'Approved'
         });
 
-        const flags = getFlags(worked, !!hasHalfDay);
+        const flags = getFlags(worked, !!hasHalfDay, 0, false, record.checkIn);
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
-        record.totalWorkedSeconds = worked;
+        record.lateCheckIn = flags.lateCheckIn;
+        record.penaltySeconds = flags.penaltySeconds;
+        record.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
         await record.save();
       }
     }
@@ -349,6 +375,9 @@ export const adminCreateAttendance = async (req, res) => {
 
       if (attendance.checkIn && attendance.checkOut) {
         const worked = calculateWorkedSeconds(attendance);
+        // Check if the attendance date is a company holiday
+        const isHolidayWork = await checkIsHoliday(attendance.date);
+
         const hasHalfDay = await LeaveRequest.findOne({
           userId: attendance.userId,
           startDate: attendance.date,
@@ -373,14 +402,21 @@ export const adminCreateAttendance = async (req, res) => {
           extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
         }
 
-        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
-        attendance.totalWorkedSeconds = worked;
+        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn);
+        // Store penalty-adjusted worked time so displayed hours already reflect the deduction
+        attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
         attendance.lowTimeFlag = flags.lowTime;
         attendance.extraTimeFlag = flags.extraTime;
+        attendance.penaltySeconds = flags.penaltySeconds;
       }
 
       await attendance.save();
       const afterData = JSON.stringify(attendance.toObject());
+
+      let logMessage = `Modified attendance record for ${date}`;
+      if (flags.lateCheckIn) {
+        logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
+      }
 
       await logAction(
         req.user._id,
@@ -388,7 +424,7 @@ export const adminCreateAttendance = async (req, res) => {
         'UPDATE_ATTENDANCE',
         'ATTENDANCE',
         attendance._id.toString(),
-        `Modified attendance record for ${date}`,
+        logMessage,
         beforeData,
         afterData
       );
@@ -481,6 +517,9 @@ export const adminCreateAttendance = async (req, res) => {
 
     if (checkInDate && checkOutDate) {
       const worked = calculateWorkedSeconds(attendance);
+      // Check if the date is a company holiday
+      const isHolidayWork = await checkIsHoliday(date);
+
       const hasHalfDay = await LeaveRequest.findOne({
         userId,
         startDate: date,
@@ -505,13 +544,20 @@ export const adminCreateAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
       }
 
-      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
-      attendance.totalWorkedSeconds = worked;
+      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, checkInDate);
+      // Store penalty-adjusted worked time so displayed hours already reflect the deduction
+      attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
       attendance.lowTimeFlag = flags.lowTime;
       attendance.extraTimeFlag = flags.extraTime;
+      attendance.penaltySeconds = flags.penaltySeconds;
     }
 
     await attendance.save();
+
+    let logMessage = `Created attendance record for ${date}`;
+    if (flags.lateCheckIn) {
+      logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
+    }
 
     await logAction(
       req.user._id,
@@ -519,7 +565,7 @@ export const adminCreateAttendance = async (req, res) => {
       'CREATE_ATTENDANCE',
       'ATTENDANCE',
       attendance._id.toString(),
-      `Created attendance record for ${date}`
+      logMessage
     );
 
     res.status(201).json(attendance);
@@ -596,11 +642,21 @@ export const adminUpdateAttendance = async (req, res) => {
         minutes = parseInt(m || '0', 10);
       }
 
-      attendance.checkOut = new Date(baseDate);
       attendance.checkOut.setHours(hours, minutes, 0, 0);
     }
 
+    if (checkIn) attendance.checkIn = new Date(checkIn);
+    if (checkOut) attendance.checkOut = new Date(checkOut);
     if (notes !== undefined) attendance.notes = notes;
+
+    // Manual Flag Overrides
+    if (isManualFlag !== undefined) {
+      attendance.isManualFlag = isManualFlag;
+      if (isManualFlag) {
+        if (lowTimeFlag !== undefined) attendance.lowTimeFlag = lowTimeFlag;
+        if (extraTimeFlag !== undefined) attendance.extraTimeFlag = extraTimeFlag;
+      }
+    }
 
     // Override breaks if provided
     if (breakDurationMinutes !== undefined) {
@@ -613,9 +669,11 @@ export const adminUpdateAttendance = async (req, res) => {
       }];
     }
 
-    // Recalculate if both checkIn and checkOut exist
-    if (attendance.checkIn && attendance.checkOut) {
+    // Only recalculate if NOT manually flagged
+    if (!attendance.isManualFlag && attendance.checkIn && attendance.checkOut) {
       const worked = calculateWorkedSeconds(attendance);
+      // Check if the attendance date is a company holiday
+      const isHolidayWork = await checkIsHoliday(attendance.date);
 
       const hasHalfDay = await LeaveRequest.findOne({
         userId: attendance.userId,
@@ -641,10 +699,15 @@ export const adminUpdateAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
       }
 
-      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
-      attendance.totalWorkedSeconds = worked;
+      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn);
+      // Store penalty-adjusted worked time so displayed hours already reflect the deduction
+      attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
       attendance.lowTimeFlag = flags.lowTime;
       attendance.extraTimeFlag = flags.extraTime;
+      attendance.penaltySeconds = flags.penaltySeconds;
+    } else if (attendance.checkIn && attendance.checkOut) {
+      // Still update worked time even if flags are manual
+      attendance.totalWorkedSeconds = calculateWorkedSeconds(attendance);
     }
 
     await attendance.save();
@@ -656,7 +719,7 @@ export const adminUpdateAttendance = async (req, res) => {
       'UPDATE_ATTENDANCE',
       'ATTENDANCE',
       recordId,
-      `Modified attendance record for ${attendance.date}`,
+      `Modified attendance record for ${attendance.date}${attendance.isManualFlag ? ' (Manual Status)' : ''}`,
       beforeData,
       afterData
     );
@@ -664,6 +727,35 @@ export const adminUpdateAttendance = async (req, res) => {
     res.json(attendance);
   } catch (error) {
     console.error('Admin update attendance error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const deleteAttendance = async (req, res) => {
+  try {
+    const { recordId } = req.params;
+    const attendance = await Attendance.findById(recordId).populate('userId', 'name');
+    if (!attendance) {
+      return res.status(404).json({ message: 'Attendance record not found' });
+    }
+
+    const employeeName = attendance.userId?.name || 'Unknown';
+    const date = attendance.date;
+
+    await Attendance.findByIdAndDelete(recordId);
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'DELETE_ATTENDANCE',
+      'ATTENDANCE',
+      recordId,
+      `Deleted attendance record for ${employeeName} on ${date}`
+    );
+
+    res.json({ message: 'Attendance record deleted successfully' });
+  } catch (error) {
+    console.error('Delete attendance error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -684,42 +776,73 @@ export const getAllAttendance = async (req, res) => {
       .sort({ date: -1 })
       .limit(1000);
 
-    // Recalculate flags for records that have checkIn and checkOut
-    for (const record of attendance) {
-      if (record.checkIn && record.checkOut) {
-        const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+    // --- OPTIMIZED: Bulk pre-fetch holidays and leaves ONCE before the loop ---
+    // Build a Set of all holiday date strings for O(1) lookup
+    const allHolidays = await CompanyHoliday.find({}, 'date').lean();
+    const holidayDateSet = new Set(allHolidays.map(h => h.date));
 
-        // Check for half-day leave
-        const hasHalfDay = await LeaveRequest.findOne({
-          userId: record.userId,
-          startDate: record.date,
-          category: 'Half Day Leave',
-          status: 'Approved'
-        });
+    // Collect unique userIds and dates from records that need recalculation
+    const recordsToProcess = attendance.filter(r => r.checkIn && r.checkOut && !r.isManualFlag);
+    const userIds = [...new Set(recordsToProcess.map(r => r.userId?._id || r.userId))];
+    const datesToQuery = [...new Set(recordsToProcess.map(r => r.date))];
 
-        // Check for Extra Time Leave
-        let extraTimeLeaveMinutes = 0;
-        const extraTimeLeave = await LeaveRequest.findOne({
-          userId: record.userId,
-          startDate: record.date,
-          category: 'Extra Time Leave',
-          status: 'Approved'
-        });
+    // Bulk fetch ALL relevant leaves for these users and dates
+    let leavesByUserDate = {};
+    if (userIds.length > 0 && datesToQuery.length > 0) {
+      const relevantLeaves = await LeaveRequest.find({
+        userId: { $in: userIds },
+        startDate: { $in: datesToQuery },
+        status: 'Approved',
+        category: { $in: ['Half Day Leave', 'Extra Time Leave'] }
+      }).lean();
 
-        if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
-          const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
-          const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
-          const startMinutes = startH * 60 + startM;
-          const endMinutes = endH * 60 + endM;
-          extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
-        }
+      // Index leaves by `${userId}-${date}-${category}` for fast lookup
+      for (const leave of relevantLeaves) {
+        const uid = leave.userId.toString();
+        const key = `${uid}-${leave.startDate}-${leave.category}`;
+        leavesByUserDate[key] = leave;
+      }
+    }
 
-        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
+    // Now process records in-memory — zero additional DB calls
+    const recordsToSave = [];
+    for (const record of recordsToProcess) {
+      const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+      const isHolidayWork = holidayDateSet.has(record.date);
+
+      const uid = (record.userId?._id || record.userId).toString();
+      const hasHalfDay = !!leavesByUserDate[`${uid}-${record.date}-Half Day Leave`];
+
+      let extraTimeLeaveMinutes = 0;
+      const extraTimeLeave = leavesByUserDate[`${uid}-${record.date}-Extra Time Leave`];
+      if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+        const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+        const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+        extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
+      }
+
+      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn);
+      const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
+
+      const changed = record.lowTimeFlag !== flags.lowTime ||
+        record.extraTimeFlag !== flags.extraTime ||
+        record.lateCheckIn !== flags.lateCheckIn ||
+        record.penaltySeconds !== flags.penaltySeconds ||
+        record.totalWorkedSeconds !== adjustedWorked;
+
+      if (changed) {
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
-        record.totalWorkedSeconds = worked;
-        await record.save();
+        record.lateCheckIn = flags.lateCheckIn;
+        record.penaltySeconds = flags.penaltySeconds;
+        record.totalWorkedSeconds = adjustedWorked;
+        recordsToSave.push(record.save());
       }
+    }
+
+    // Bulk save all changed records in parallel
+    if (recordsToSave.length > 0) {
+      await Promise.all(recordsToSave);
     }
 
     res.json(attendance);
@@ -736,47 +859,132 @@ export const getTodayAllAttendance = async (req, res) => {
       .populate('userId', 'name username email department role')
       .sort({ checkIn: 1 });
 
-    // Recalculate flags for records that have checkIn and checkOut
-    for (const record of attendance) {
-      if (record.checkIn && record.checkOut) {
-        const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+    // --- OPTIMIZED: Bulk pre-fetch holidays and leaves ONCE before the loop ---
+    const isHolidayWork = !!(await CompanyHoliday.findOne({ date: today }).lean());
 
-        // Check for half-day leave
-        const hasHalfDay = await LeaveRequest.findOne({
-          userId: record.userId,
-          startDate: record.date,
-          category: 'Half Day Leave',
-          status: 'Approved'
-        });
+    const recordsToProcess = attendance.filter(r => r.checkIn && r.checkOut && !r.isManualFlag);
+    const userIds = recordsToProcess.map(r => r.userId?._id || r.userId);
 
-        // Check for Extra Time Leave
-        let extraTimeLeaveMinutes = 0;
-        const extraTimeLeave = await LeaveRequest.findOne({
-          userId: record.userId,
-          startDate: record.date,
-          category: 'Extra Time Leave',
-          status: 'Approved'
-        });
+    let leavesByUserCategory = {};
+    if (userIds.length > 0) {
+      const todayLeaves = await LeaveRequest.find({
+        userId: { $in: userIds },
+        startDate: today,
+        status: 'Approved',
+        category: { $in: ['Half Day Leave', 'Extra Time Leave'] }
+      }).lean();
 
-        if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
-          const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
-          const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
-          const startMinutes = startH * 60 + startM;
-          const endMinutes = endH * 60 + endM;
-          extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
-        }
+      for (const leave of todayLeaves) {
+        const key = `${leave.userId.toString()}-${leave.category}`;
+        leavesByUserCategory[key] = leave;
+      }
+    }
 
-        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
+    const recordsToSave = [];
+    for (const record of recordsToProcess) {
+      const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+      const uid = (record.userId?._id || record.userId).toString();
+
+      const hasHalfDay = !!leavesByUserCategory[`${uid}-Half Day Leave`];
+      let extraTimeLeaveMinutes = 0;
+      const extraTimeLeave = leavesByUserCategory[`${uid}-Extra Time Leave`];
+      if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+        const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+        const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+        extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
+      }
+
+      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn);
+      const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
+
+      const changed = record.lowTimeFlag !== flags.lowTime ||
+        record.extraTimeFlag !== flags.extraTime ||
+        record.lateCheckIn !== flags.lateCheckIn ||
+        record.penaltySeconds !== flags.penaltySeconds ||
+        record.totalWorkedSeconds !== adjustedWorked;
+
+      if (changed) {
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
-        record.totalWorkedSeconds = worked;
-        await record.save();
+        record.lateCheckIn = flags.lateCheckIn;
+        record.penaltySeconds = flags.penaltySeconds;
+        record.totalWorkedSeconds = adjustedWorked;
+        recordsToSave.push(record.save());
       }
+    }
+
+    if (recordsToSave.length > 0) {
+      await Promise.all(recordsToSave);
     }
 
     res.json(attendance);
   } catch (error) {
     console.error('Get today all attendance error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * Migration endpoint: Recalculate overtime/low-time flags for all attendance records
+ * that fall on company holiday dates.
+ * Call once (POST /api/attendance/admin/recalculate-holiday-flags) with Admin/HR token.
+ */
+export const recalculateHolidayFlags = async (req, res) => {
+  try {
+    // Fetch all holiday dates
+    const holidays = await CompanyHoliday.find({}, 'date');
+    if (holidays.length === 0) {
+      return res.json({ message: 'No holidays found. Nothing to update.', updated: 0 });
+    }
+
+    const holidayDates = holidays.map(h => h.date); // Array of YYYY-MM-DD strings
+
+    // Find all attendance records on holiday dates that have both checkIn and checkOut
+    const records = await Attendance.find({
+      date: { $in: holidayDates },
+      checkIn: { $exists: true },
+      checkOut: { $exists: true }
+    });
+
+    if (records.length === 0) {
+      return res.json({ message: 'No attendance records found on holiday dates.', updated: 0 });
+    }
+
+    let updatedCount = 0;
+
+    for (const record of records) {
+      const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+
+      // On a holiday: all worked time is overtime, no lowTime
+      const flags = getFlags(worked, false, 0, true);
+
+      const wasChanged = record.lowTimeFlag !== flags.lowTime || record.extraTimeFlag !== flags.extraTime;
+      if (wasChanged) {
+        record.lowTimeFlag = flags.lowTime;
+        record.extraTimeFlag = flags.extraTime;
+        record.totalWorkedSeconds = worked;
+        await record.save();
+        updatedCount++;
+      }
+    }
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'RECALCULATE_HOLIDAY_FLAGS',
+      'ATTENDANCE',
+      'BULK',
+      `Recalculated holiday overtime flags: ${updatedCount} record(s) updated out of ${records.length} found on ${holidayDates.length} holiday date(s)`
+    );
+
+    res.json({
+      message: `Successfully recalculated holiday flags. ${updatedCount} record(s) updated.`,
+      total: records.length,
+      updated: updatedCount,
+      holidayDates
+    });
+  } catch (error) {
+    console.error('Recalculate holiday flags error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };

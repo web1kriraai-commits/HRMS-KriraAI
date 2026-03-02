@@ -32,7 +32,7 @@ const leaveRequestSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['Pending', 'Approved', 'Rejected'],
+    enum: ['Pending', 'Approved', 'Rejected', 'Cancelled'],
     default: 'Pending'
   },
   hrComment: {
@@ -47,6 +47,10 @@ const leaveRequestSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+// Indexes for fast per-user per-date lookups (used during clock-in/out and bulk fetches)
+leaveRequestSchema.index({ userId: 1, startDate: 1, status: 1 });
+leaveRequestSchema.index({ userId: 1, startDate: 1, category: 1, status: 1 });
 
 export default mongoose.model('LeaveRequest', leaveRequestSchema);
 
