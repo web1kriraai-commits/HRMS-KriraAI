@@ -4,6 +4,8 @@ import CompanyHoliday from '../models/CompanyHoliday.js';
 import { calculateWorkedSeconds, getFlags, getTodayStr } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
+// Forced reload to clear potential nodemon cache issues.
+
 // Helper: check if a date string (YYYY-MM-DD) is a company holiday
 const checkIsHoliday = async (dateStr) => {
   const holiday = await CompanyHoliday.findOne({ date: dateStr });
@@ -17,29 +19,46 @@ export const clockIn = async (req, res) => {
 
     // Check if already clocked in today
     const existing = await Attendance.findOne({ userId, date: today });
-    if (existing) {
+    if (existing && existing.checkIn) {
       return res.status(400).json({ message: 'Already clocked in today' });
     }
 
     const now = new Date();
     const isHoliday = await checkIsHoliday(today);
-    const { lateCheckIn, penaltySeconds } = getFlags(0, false, 0, isHoliday, now);
 
-    const attendance = new Attendance({
-      userId,
-      date: today,
-      checkIn: now,
-      location: req.body.location || 'Office',
-      breaks: [],
-      totalWorkedSeconds: 0,
-      lowTimeFlag: false,
-      extraTimeFlag: false,
-      lateCheckIn,
-      penaltySeconds
-    });
+    // If a record already exists (e.g. created by admin as a waiver), use its isPenaltyDisabled flag
+    const isPenaltyDisabled = existing ? !!existing.isPenaltyDisabled : false;
 
-    await attendance.save();
-    await logAction(req.user._id, req.user.name, 'CLOCK_IN', 'ATTENDANCE', attendance._id.toString(), `Clocked in at ${today}`);
+    const { lateCheckIn, penaltySeconds } = getFlags(0, false, 0, isHoliday, now, isPenaltyDisabled);
+
+    let attendance;
+    if (existing) {
+      // Update the placeholder record
+      existing.checkIn = now;
+      existing.location = req.body.location || 'Office';
+      existing.lateCheckIn = !!lateCheckIn;
+      existing.penaltySeconds = penaltySeconds;
+      // Note: we don't change existing.isPenaltyDisabled here as it was set by admin
+      attendance = await existing.save();
+    } else {
+      // Create new record
+      attendance = new Attendance({
+        userId,
+        date: today,
+        checkIn: now,
+        location: req.body.location || 'Office',
+        breaks: [],
+        totalWorkedSeconds: 0,
+        lowTimeFlag: false,
+        extraTimeFlag: false,
+        lateCheckIn: !!lateCheckIn,
+        penaltySeconds,
+        isPenaltyDisabled: false
+      });
+      await attendance.save();
+    }
+
+    await logAction(req.user._id, req.user.name, 'CLOCK_IN', 'ATTENDANCE', attendance._id.toString(), `Clocked in at ${today}${isPenaltyDisabled ? ' (Penalty Exempted)' : ''}`);
 
     res.json(attendance);
   } catch (error) {
@@ -101,7 +120,7 @@ export const clockOut = async (req, res) => {
       extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
     }
 
-    const { lowTime, extraTime, lateCheckIn, penaltySeconds } = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn);
+    const { lowTime, extraTime, lateCheckIn, penaltySeconds } = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn, attendance.isPenaltyDisabled);
 
     // Store penalty-adjusted worked time so displayed hours already reflect the deduction
     attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
@@ -269,7 +288,7 @@ export const getAttendanceHistory = async (req, res) => {
           status: 'Approved'
         });
 
-        const flags = getFlags(worked, !!hasHalfDay, 0, false, record.checkIn);
+        const flags = getFlags(worked, !!hasHalfDay, 0, false, record.checkIn, record.isPenaltyDisabled);
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
         record.lateCheckIn = flags.lateCheckIn;
@@ -289,7 +308,7 @@ export const getAttendanceHistory = async (req, res) => {
 // Admin create or update attendance
 export const adminCreateAttendance = async (req, res) => {
   try {
-    const { userId, date, checkIn, checkOut, breakDurationMinutes, notes } = req.body;
+    const { userId, date, checkIn, checkOut, breakDurationMinutes, notes, isPenaltyDisabled } = req.body;
 
     if (!userId || !date) {
       return res.status(400).json({ message: 'userId and date are required' });
@@ -373,6 +392,7 @@ export const adminCreateAttendance = async (req, res) => {
         }];
       }
 
+      let flags = null;
       if (attendance.checkIn && attendance.checkOut) {
         const worked = calculateWorkedSeconds(attendance);
         // Check if the attendance date is a company holiday
@@ -402,7 +422,7 @@ export const adminCreateAttendance = async (req, res) => {
           extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
         }
 
-        const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn);
+        flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn, !!isPenaltyDisabled || !!attendance.isPenaltyDisabled);
         // Store penalty-adjusted worked time so displayed hours already reflect the deduction
         attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
         attendance.lowTimeFlag = flags.lowTime;
@@ -414,7 +434,7 @@ export const adminCreateAttendance = async (req, res) => {
       const afterData = JSON.stringify(attendance.toObject());
 
       let logMessage = `Modified attendance record for ${date}`;
-      if (flags.lateCheckIn) {
+      if (flags && flags.lateCheckIn) {
         logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
       }
 
@@ -512,9 +532,11 @@ export const adminCreateAttendance = async (req, res) => {
       notes,
       totalWorkedSeconds: 0,
       lowTimeFlag: false,
-      extraTimeFlag: false
+      extraTimeFlag: false,
+      isPenaltyDisabled: !!isPenaltyDisabled
     });
 
+    let flags = null;
     if (checkInDate && checkOutDate) {
       const worked = calculateWorkedSeconds(attendance);
       // Check if the date is a company holiday
@@ -544,7 +566,7 @@ export const adminCreateAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
       }
 
-      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, checkInDate);
+      flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, checkInDate, !!isPenaltyDisabled);
       // Store penalty-adjusted worked time so displayed hours already reflect the deduction
       attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
       attendance.lowTimeFlag = flags.lowTime;
@@ -555,7 +577,12 @@ export const adminCreateAttendance = async (req, res) => {
     await attendance.save();
 
     let logMessage = `Created attendance record for ${date}`;
-    if (flags.lateCheckIn) {
+    // Reuse flags or calculate if needed for logging
+    if (!flags && checkInDate && checkOutDate) {
+      flags = getFlags(calculateWorkedSeconds(attendance), false, 0, await checkIsHoliday(date), checkInDate, !!isPenaltyDisabled);
+    }
+
+    if (flags && flags.lateCheckIn) {
       logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
     }
 
@@ -578,7 +605,7 @@ export const adminCreateAttendance = async (req, res) => {
 export const adminUpdateAttendance = async (req, res) => {
   try {
     const { recordId } = req.params;
-    const { checkIn, checkOut, breakDurationMinutes, notes } = req.body;
+    const { checkIn, checkOut, breakDurationMinutes, notes, isPenaltyDisabled, isManualFlag, lowTimeFlag, extraTimeFlag } = req.body;
 
     const attendance = await Attendance.findById(recordId);
     if (!attendance) {
@@ -642,11 +669,11 @@ export const adminUpdateAttendance = async (req, res) => {
         minutes = parseInt(m || '0', 10);
       }
 
+      attendance.checkOut = new Date(baseDate);
       attendance.checkOut.setHours(hours, minutes, 0, 0);
     }
 
-    if (checkIn) attendance.checkIn = new Date(checkIn);
-    if (checkOut) attendance.checkOut = new Date(checkOut);
+    if (isPenaltyDisabled !== undefined) attendance.isPenaltyDisabled = isPenaltyDisabled;
     if (notes !== undefined) attendance.notes = notes;
 
     // Manual Flag Overrides
@@ -699,7 +726,7 @@ export const adminUpdateAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
       }
 
-      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn);
+      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn, attendance.isPenaltyDisabled);
       // Store penalty-adjusted worked time so displayed hours already reflect the deduction
       attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
       attendance.lowTimeFlag = flags.lowTime;
@@ -821,7 +848,7 @@ export const getAllAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
       }
 
-      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn);
+      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn, record.isPenaltyDisabled);
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
       const changed = record.lowTimeFlag !== flags.lowTime ||
@@ -894,7 +921,7 @@ export const getTodayAllAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
       }
 
-      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn);
+      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn, record.isPenaltyDisabled);
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
       const changed = record.lowTimeFlag !== flags.lowTime ||
@@ -956,7 +983,7 @@ export const recalculateHolidayFlags = async (req, res) => {
       const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
 
       // On a holiday: all worked time is overtime, no lowTime
-      const flags = getFlags(worked, false, 0, true);
+      const flags = getFlags(worked, false, 0, true, null, record.isPenaltyDisabled);
 
       const wasChanged = record.lowTimeFlag !== flags.lowTime || record.extraTimeFlag !== flags.extraTime;
       if (wasChanged) {
@@ -1067,7 +1094,7 @@ export const recalculateHalfDayFlags = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
       }
 
-      const flags = getFlags(worked, true, extraTimeLeaveMinutes, isHolidayWork, record.checkIn);
+      const flags = getFlags(worked, true, extraTimeLeaveMinutes, isHolidayWork, record.checkIn, record.isPenaltyDisabled);
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
       const changed =

@@ -26,14 +26,8 @@ export const requestLeave = async (req, res) => {
       });
     }
 
-    // Validate time fields for extra time leave and half day leave
-    if (category === 'Extra Time Leave') {
-      if (!startTime || !endTime) {
-        return res.status(400).json({
-          message: 'Start time and end time are required for Extra Time Leave'
-        });
-      }
-    } else if (category === 'Half Day Leave') {
+    // Validate time fields for half day leave
+    if (category === 'Half Day Leave') {
       if (!startTime) {
         return res.status(400).json({
           message: 'Start time is required for Half Day Leave'

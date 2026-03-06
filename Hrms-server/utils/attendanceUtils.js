@@ -74,9 +74,10 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
  * @param {number} extraTimeLeaveMinutes - Additional minutes from Extra Time Leave
  * @param {boolean} isHolidayWork - If true, ALL worked time is overtime (no low time ever)
  * @param {string|Date|null} checkInTime - Check-in timestamp; if after 9:00 AM, apply 15-min penalty
+ * @param {boolean} isPenaltyDisabled - If true, no late check-in penalty is applied
  * @returns {{ lowTime: boolean, extraTime: boolean, lateCheckIn: boolean, penaltySeconds: number }}
  */
-export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null) => {
+export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false) => {
   // Holiday rule: if employee works on a holiday, entire duration is overtime, no penalty
   if (isHolidayWork) {
     return {
@@ -88,11 +89,11 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
   }
 
   // Late check-in penalty: deduct 15 minutes from effective worked time
-  // ONLY apply penalty if date is on or after PENALTY_EFFECTIVE_DATE
+  // ONLY apply penalty if date is on or after PENALTY_EFFECTIVE_DATE AND penalties are not disabled
   const late = isLateCheckIn(checkInTime);
   let penaltySeconds = 0;
 
-  if (late && checkInTime) {
+  if (late && checkInTime && !isPenaltyDisabled) {
     const d = new Date(checkInTime);
     // Format to YYYY-MM-DD for comparison
     const year = d.getFullYear();

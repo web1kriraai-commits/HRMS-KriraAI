@@ -47,6 +47,10 @@ const attendanceSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  isPenaltyDisabled: {
+    type: Boolean,
+    default: false
+  },
   lowTimeFlag: {
     type: Boolean,
     default: false

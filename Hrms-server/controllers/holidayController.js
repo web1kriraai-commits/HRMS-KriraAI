@@ -179,7 +179,7 @@ export const addHoliday = async (req, res) => {
           req.user._id,
           req.user.name,
           'ADD_HOLIDAY',
-          'SYSTEM',
+          'HOLIDAY',
           'MULTIPLE',
           `Added ${addedCount} holiday(s) for month ${monthNum}/${yearNum}: ${holidaysAdded.join(', ')}`,
           null,
@@ -214,7 +214,7 @@ export const addHoliday = async (req, res) => {
         req.user._id,
         req.user.name,
         'ADD_HOLIDAY',
-        'SYSTEM',
+        'HOLIDAY',
         holiday._id.toString(),
         `Added holiday: ${description} on ${dateStr}`,
         null,
@@ -258,7 +258,7 @@ export const deleteHoliday = async (req, res) => {
       return res.status(404).json({ message: 'Holiday not found' });
     }
 
-    const holidayName = holiday.name;
+    const holidayDesc = holiday.description;
     const holidayDate = holiday.date;
 
     await CompanyHoliday.findByIdAndDelete(id);
@@ -269,7 +269,7 @@ export const deleteHoliday = async (req, res) => {
       'DELETE_HOLIDAY',
       'HOLIDAY',
       id,
-      `Deleted holiday: ${holidayName} (${holidayDate})`
+      `Deleted holiday: ${holidayDesc} (${holidayDate})`
     );
 
     res.json({ message: 'Holiday deleted successfully' });
@@ -282,7 +282,7 @@ export const deleteHoliday = async (req, res) => {
 export const updateHoliday = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, date, type } = req.body;
+    const { description, date } = req.body;
 
     const holiday = await CompanyHoliday.findById(id);
     if (!holiday) {
@@ -291,9 +291,8 @@ export const updateHoliday = async (req, res) => {
 
     const beforeData = JSON.stringify(holiday.toObject());
 
-    if (name) holiday.name = name;
+    if (description) holiday.description = description;
     if (date) holiday.date = date;
-    if (type) holiday.type = type;
 
     await holiday.save();
     const afterData = JSON.stringify(holiday.toObject());
@@ -304,7 +303,7 @@ export const updateHoliday = async (req, res) => {
       'UPDATE_HOLIDAY',
       'HOLIDAY',
       id,
-      `Updated holiday: ${holiday.name} (${holiday.date})`,
+      `Updated holiday: ${holiday.description} on ${holiday.date}`,
       beforeData,
       afterData
     );
@@ -382,7 +381,7 @@ export const autoAddSundaysForMonth = async (force = false, userInfo = null) => 
         userInfo ? userInfo._id : null,
         userInfo ? userInfo.name : 'System',
         force ? 'MANUAL_ADD_SUNDAYS' : 'AUTO_ADD_SUNDAYS',
-        'SYSTEM',
+        'HOLIDAY',
         'MONTHLY',
         force
           ? `Manually added ${addedCount} Sunday(s) for ${month}/${year}: ${addedDates.join(', ')}`
@@ -465,6 +464,19 @@ export const autoAddSundays = async () => {
       await nextSundayHoliday.save();
       addedCount++;
       addedDates.push(nextSundayStr);
+    }
+
+    if (addedCount > 0) {
+      await logAction(
+        null,
+        'System',
+        'AUTO_ADD_SUNDAYS',
+        'HOLIDAY',
+        'WEEKLY',
+        `Automatically added ${addedCount} Sunday(s): ${addedDates.join(', ')}`,
+        null,
+        JSON.stringify({ dates: addedDates })
+      );
     }
 
     return {
