@@ -21,7 +21,7 @@ dotenv.config({ path: join(__dirname, '..', '.env') });
 const HALF_DAY_MIN_SECONDS = 4 * 3600; // 4 hours = 14400 seconds
 const MIN_NORMAL_SECONDS = (8 * 3600) + (15 * 60); // 8h 15m = 29700 seconds
 
-await mongoose.connect(process.env.MONGODB_URI, { dbName: 'hrms' });
+await mongoose.connect(process.env.MONGODB_URI, { dbName: process.env.MONGODB_DB_NAME || 'hrms' });
 console.log('Connected to MongoDB (hrms database).\n');
 
 const db = mongoose.connection.db;

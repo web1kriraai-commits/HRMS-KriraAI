@@ -38,8 +38,13 @@ export const login = async (req, res) => {
 
     const usernameLower = username.toLowerCase().trim();
 
-    // Find user by username
-    const user = await User.findOne({ username: usernameLower });
+    // Find user by username or email
+    const user = await User.findOne({
+      $or: [
+        { username: usernameLower },
+        { email: usernameLower }
+      ]
+    });
 
     if (!user) {
       return res.status(401).json({ message: 'Invalid credentials' });

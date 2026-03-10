@@ -11,8 +11,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, '..', '.env') });
 
-// Connect with dbName: 'hrms' to match the server connection
-await mongoose.connect(process.env.MONGODB_URI, { dbName: 'hrms' });
+// Connect with dbName from environment variables
+await mongoose.connect(process.env.MONGODB_URI, { dbName: process.env.MONGODB_DB_NAME || 'hrms' });
 console.log('Connected to MongoDB (hrms database).\n');
 
 const db = mongoose.connection.db;

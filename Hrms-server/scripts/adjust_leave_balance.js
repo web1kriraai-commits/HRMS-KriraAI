@@ -5,16 +5,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 let MONGODB_URI = process.env.MONGODB_URI;
-// Ensure we connect to 'hrms' database correctly
-if (MONGODB_URI.endsWith('/')) {
-    MONGODB_URI = MONGODB_URI + 'hrms';
-} else {
-    MONGODB_URI = MONGODB_URI + '/hrms';
-}
+// Connection will use dbName option
+const dbName = process.env.MONGODB_DB_NAME || 'hrms';
 
 async function run() {
     try {
-        await mongoose.connect(MONGODB_URI);
+        await mongoose.connect(MONGODB_URI, { dbName });
         console.log('Connected to:', mongoose.connection.db.databaseName);
 
         const LeaveRequest = mongoose.model('LeaveRequest', new mongoose.Schema({}, { strict: false }));

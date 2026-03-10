@@ -13,7 +13,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 async function run() {
     try {
-        await mongoose.connect(MONGODB_URI + 'hrms');
+        await mongoose.connect(MONGODB_URI, { dbName: process.env.MONGODB_DB_NAME || 'hrms' });
         const User = mongoose.model('User', new mongoose.Schema({}, { strict: false }));
         const LeaveRequest = mongoose.model('LeaveRequest', new mongoose.Schema({}, { strict: false }));
 
