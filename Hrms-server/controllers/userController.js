@@ -276,7 +276,7 @@ export const deleteUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, email, department, paidLeaveAllocation, paidLeaveAction, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, password } = req.body;
+    const { name, email, department, paidLeaveAllocation, paidLeaveAction, manualPaidLeaveAdjustment, manualExtraTimeAdjustment, manualUnpaidLeaveAdjustment, manualHalfDayLeaveAdjustment, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, password } = req.body;
     const currentUser = req.user;
 
     console.log(`Update user ${id} request:`, { paidLeaveAllocation, paidLeaveAction, bodyAction: req.body.paidLeaveAction });
@@ -373,6 +373,20 @@ export const updateUser = async (req, res) => {
 
       // Update last allocation date
       user.paidLeaveLastAllocatedDate = new Date();
+    }
+    
+    // Update manual leave adjustments
+    if (manualPaidLeaveAdjustment !== undefined) {
+      user.manualPaidLeaveAdjustment = parseFloat(manualPaidLeaveAdjustment) || 0;
+    }
+    if (manualExtraTimeAdjustment !== undefined) {
+      user.manualExtraTimeAdjustment = parseFloat(manualExtraTimeAdjustment) || 0;
+    }
+    if (manualUnpaidLeaveAdjustment !== undefined) {
+      user.manualUnpaidLeaveAdjustment = parseFloat(manualUnpaidLeaveAdjustment) || 0;
+    }
+    if (manualHalfDayLeaveAdjustment !== undefined) {
+      user.manualHalfDayLeaveAdjustment = parseFloat(manualHalfDayLeaveAdjustment) || 0;
     }
 
     // Update joining date if provided

@@ -72,6 +72,22 @@ const userSchema = new mongoose.Schema({
   paidLeaveLastAllocatedDate: {
     type: Date // Last date when paid leave was allocated
   },
+  manualPaidLeaveAdjustment: {
+    type: Number,
+    default: 0
+  },
+  manualExtraTimeAdjustment: {
+    type: Number,
+    default: 0
+  },
+  manualUnpaidLeaveAdjustment: {
+    type: Number,
+    default: 0
+  },
+  manualHalfDayLeaveAdjustment: {
+    type: Number,
+    default: 0
+  },
   joiningDate: {
     type: String, // Employee joining date in dd-mm-yyyy format
     trim: true
