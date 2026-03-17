@@ -1,7 +1,8 @@
 import Attendance from '../models/Attendance.js';
+import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
 // Forced reload to clear potential nodemon cache issues.
@@ -295,6 +296,17 @@ export const getAttendanceHistory = async (req, res) => {
         record.penaltySeconds = flags.penaltySeconds;
         record.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
         await record.save();
+      }
+    }
+
+    // Ensure manual-only records (admin-added hours, no check-in) have totalWorkedSeconds set from manualHours so they count in totals
+    for (const record of attendance) {
+      if (!record.checkIn && record.manualHours && record.manualHours.length > 0) {
+        const fromManual = calculateTotalManualSeconds(record.manualHours);
+        if ((record.totalWorkedSeconds == null || record.totalWorkedSeconds === 0) && fromManual > 0) {
+          record.totalWorkedSeconds = fromManual;
+          await record.save();
+        }
       }
     }
 
@@ -605,7 +617,7 @@ export const adminCreateAttendance = async (req, res) => {
 export const adminUpdateAttendance = async (req, res) => {
   try {
     const { recordId } = req.params;
-    const { checkIn, checkOut, breakDurationMinutes, notes, isPenaltyDisabled, isManualFlag, lowTimeFlag, extraTimeFlag } = req.body;
+    const { checkIn, checkOut, breakDurationMinutes, notes, isPenaltyDisabled, isManualFlag, lowTimeFlag, extraTimeFlag, totalWorkedSeconds: bodyTotalWorkedSeconds, workedHours: bodyWorkedHours } = req.body;
 
     const attendance = await Attendance.findById(recordId);
     if (!attendance) {
@@ -694,6 +706,15 @@ export const adminUpdateAttendance = async (req, res) => {
         type: 'Standard',
         durationSeconds: breakDurationMinutes * 60
       }];
+    }
+
+    // Allow admin to set worked hours for manual-only entries (no check-in/check-out) or override
+    if (bodyTotalWorkedSeconds !== undefined && bodyTotalWorkedSeconds !== null) {
+      const sec = Math.max(0, Math.round(Number(bodyTotalWorkedSeconds)));
+      attendance.totalWorkedSeconds = sec;
+    } else if (bodyWorkedHours !== undefined && bodyWorkedHours !== null) {
+      const sec = Math.max(0, Math.round(Number(bodyWorkedHours) * 3600));
+      attendance.totalWorkedSeconds = sec;
     }
 
     // Only recalculate if NOT manually flagged
@@ -1135,6 +1156,179 @@ export const recalculateHalfDayFlags = async (req, res) => {
     });
   } catch (error) {
     console.error('Recalculate half-day flags error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const addManualHours = async (req, res) => {
+  try {
+    const { date, hours, note } = req.body;
+    const userId = req.user._id;
+
+    if (!date || !hours) {
+      return res.status(400).json({ message: 'Date and hours are required' });
+    }
+
+    let attendance = await Attendance.findOne({ userId, date });
+    if (!attendance) {
+      // Create a skeleton record if it doesn't exist
+      attendance = new Attendance({
+        userId,
+        date,
+        manualHours: [],
+        totalWorkedSeconds: 0
+      });
+    }
+
+    attendance.manualHours.push({
+      hours: Number(hours),
+      type: 'Employee',
+      addedBy: userId,
+      note
+    });
+
+    // Recalculate everything if they check out or if we want real-time flags
+    const worked = calculateWorkedSeconds(attendance);
+    const isHoliday = await checkIsHoliday(date);
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId,
+      startDate: date,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+
+    const { lowTime, extraTime, penaltySeconds } = getFlags(worked, !!hasHalfDay, 0, isHoliday, attendance.checkIn, attendance.isPenaltyDisabled);
+
+    attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
+    attendance.lowTimeFlag = lowTime;
+    attendance.extraTimeFlag = extraTime;
+
+    await attendance.save();
+
+    await logAction(req.user._id, req.user.name, 'ADD_MANUAL_HOURS', 'ATTENDANCE', attendance._id.toString(), `Added ${hours} manual hours for ${date}`);
+
+    res.json(attendance);
+  } catch (error) {
+    console.error('Add manual hours error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const adminAddManualHours = async (req, res) => {
+  try {
+    const { userId, date, hours, note } = req.body;
+
+    if (!userId || !date || !hours) {
+      return res.status(400).json({ message: 'userId, date and hours are required' });
+    }
+
+    let attendance = await Attendance.findOne({ userId, date });
+    if (!attendance) {
+      attendance = new Attendance({
+        userId,
+        date,
+        manualHours: [],
+        totalWorkedSeconds: 0
+      });
+    }
+
+    attendance.manualHours.push({
+      hours: Number(hours),
+      type: 'Admin',
+      addedBy: req.user._id,
+      note
+    });
+
+    const worked = calculateWorkedSeconds(attendance);
+    const isHoliday = await checkIsHoliday(date);
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId,
+      startDate: date,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+
+    const { lowTime, extraTime, penaltySeconds } = getFlags(worked, !!hasHalfDay, 0, isHoliday, attendance.checkIn, attendance.isPenaltyDisabled);
+
+    attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
+    attendance.lowTimeFlag = lowTime;
+    attendance.extraTimeFlag = extraTime;
+
+    await attendance.save();
+
+    await logAction(req.user._id, req.user.name, 'ADMIN_ADD_MANUAL_HOURS', 'ATTENDANCE', attendance._id.toString(), `Admin added ${hours} manual hours for user ${userId} on ${date}`);
+
+    res.json(attendance);
+  } catch (error) {
+    console.error('Admin add manual hours error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const adminBulkAddManualHours = async (req, res) => {
+  try {
+    const { date, hours, note, department } = req.body;
+
+    if (!date || !hours) {
+      return res.status(400).json({ message: 'Date and hours are required' });
+    }
+
+    const userQuery = { role: { $in: ['Employee', 'HR'] } };
+    if (department) {
+      userQuery.department = department;
+    }
+
+    const targetUsers = await User.find(userQuery).select('_id name');
+    const userIds = targetUsers.map(u => u._id);
+
+    if (userIds.length === 0) {
+      return res.json({ message: 'No users found matching the criteria.', updatedCount: 0 });
+    }
+
+    // Process each user
+    const ops = userIds.map(async (userId) => {
+      let attendance = await Attendance.findOne({ userId, date });
+      if (!attendance) {
+        attendance = new Attendance({
+          userId,
+          date,
+          manualHours: [],
+          totalWorkedSeconds: 0
+        });
+      }
+
+      attendance.manualHours.push({
+        hours: Number(hours),
+        type: 'Admin',
+        addedBy: req.user._id,
+        note: note || 'Bulk added hours'
+      });
+
+      const worked = calculateWorkedSeconds(attendance);
+      const isHoliday = await checkIsHoliday(date);
+      const hasHalfDay = await LeaveRequest.findOne({
+        userId,
+        startDate: date,
+        category: 'Half Day Leave',
+        status: 'Approved'
+      });
+
+      const { lowTime, extraTime, penaltySeconds } = getFlags(worked, !!hasHalfDay, 0, isHoliday, attendance.checkIn, attendance.isPenaltyDisabled);
+
+      attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
+      attendance.lowTimeFlag = lowTime;
+      attendance.extraTimeFlag = extraTime;
+
+      return attendance.save();
+    });
+
+    await Promise.all(ops);
+
+    await logAction(req.user._id, req.user.name, 'ADMIN_BULK_ADD_MANUAL_HOURS', 'ATTENDANCE', 'BULK', `Admin bulk added ${hours} manual hours for ${userIds.length} users on ${date}`);
+
+    res.json({ message: `Successfully added ${hours} hours to ${userIds.length} users.`, updatedCount: userIds.length });
+  } catch (error) {
+    console.error('Admin bulk add manual hours error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };

@@ -23,6 +23,31 @@ const breakSchema = new mongoose.Schema({
   }
 }, { _id: true });
 
+const manualHourSchema = new mongoose.Schema({
+  hours: {
+    type: Number,
+    required: true
+  },
+  type: {
+    type: String,
+    enum: ['Employee', 'Admin'],
+    required: true
+  },
+  addedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  note: {
+    type: String,
+    trim: true
+  },
+  timestamp: {
+    type: Date,
+    default: Date.now
+  }
+}, { _id: true });
+
 const attendanceSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -43,6 +68,7 @@ const attendanceSchema = new mongoose.Schema({
     type: String
   },
   breaks: [breakSchema],
+  manualHours: [manualHourSchema],
   totalWorkedSeconds: {
     type: Number,
     default: 0

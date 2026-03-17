@@ -47,7 +47,7 @@ export const calculateDurationSeconds = (start, end) => {
 };
 
 export const calculateTotalBreakSeconds = (breaks) => {
-  return breaks.reduce((acc, b) => {
+  return (breaks || []).reduce((acc, b) => {
     if (b.start && b.end) {
       return acc + calculateDurationSeconds(b.start, b.end);
     }
@@ -55,16 +55,24 @@ export const calculateTotalBreakSeconds = (breaks) => {
   }, 0);
 };
 
+export const calculateTotalManualSeconds = (manualHours) => {
+  return (manualHours || []).reduce((acc, m) => {
+    return acc + (m.hours * 3600);
+  }, 0);
+};
+
 export const calculateWorkedSeconds = (attendance, checkOutTime) => {
-  if (!attendance.checkIn) return 0;
+  const totalManual = calculateTotalManualSeconds(attendance.manualHours || []);
+  
+  if (!attendance.checkIn) return totalManual;
 
   const endTimeStr = checkOutTime || attendance.checkOut;
-  if (!endTimeStr) return 0; // Still active
+  if (!endTimeStr) return totalManual; // Session active, only count manual for now
 
   const totalSession = calculateDurationSeconds(attendance.checkIn, endTimeStr);
   const totalBreaks = calculateTotalBreakSeconds(attendance.breaks);
 
-  return Math.max(0, totalSession - totalBreaks);
+  return Math.max(0, totalSession - totalBreaks + totalManual);
 };
 
 /**
@@ -118,8 +126,8 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
     // If Half-Day approved (4h leave), the remaining work target is:
     // Low threshold: 8h 15m - 4h = 4h 15m (255 min)
     // Extra threshold: 8h 22m - 4h = 4h 22m (262 min)
-    const halfMinNormal = 255;
-    const halfMaxNormal = 262;
+    const halfMinNormal = MIN_NORMAL_MINUTES / 2; // 247.5
+    const halfMaxNormal = MAX_NORMAL_MINUTES / 2; // 251
     return {
       lowTime: workedMinutes > 0 && workedMinutes < halfMinNormal,
       extraTime: workedMinutes > halfMaxNormal,
