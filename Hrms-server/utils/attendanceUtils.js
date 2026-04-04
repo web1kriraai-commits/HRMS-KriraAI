@@ -12,6 +12,8 @@ const HALF_DAY_THRESHOLD_MINUTES = 240; // 4h 0m (standard half-day duration)
 const LATE_CHECKIN_HOUR = 9; // 9:00 AM cutoff
 export const MIN_LATE_PENALTY_SECONDS = 15 * 60; // 900 seconds = 15 minutes
 const PENALTY_EFFECTIVE_DATE = '2026-03-01'; // Apply to current records
+export const OVERTIME_POLICY_EFFECTIVE_DATE = '2026-04-06';
+export const COMPULSORY_BREAK_EFFECTIVE_DATE = '2026-04-06';
 
 /**
  * Returns true if the checkInTime is after 9:00:00 AM local time.
