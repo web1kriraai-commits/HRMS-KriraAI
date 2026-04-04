@@ -12,6 +12,8 @@ const HALF_DAY_THRESHOLD_MINUTES = 240; // 4h 0m (standard half-day duration)
 const LATE_CHECKIN_HOUR = 9; // 9:00 AM cutoff
 export const MIN_LATE_PENALTY_SECONDS = 15 * 60; // 900 seconds = 15 minutes
 const PENALTY_EFFECTIVE_DATE = '2026-03-01'; // Apply to current records
+export const OVERTIME_POLICY_EFFECTIVE_DATE = '2026-04-06';
+export const COMPULSORY_BREAK_EFFECTIVE_DATE = '2026-04-06';
 
 /**
  * Returns true if the checkInTime is after 9:00:00 AM local time.
@@ -84,9 +86,10 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
  * @param {string|Date|null} checkInTime - Check-in timestamp; if after 9:00 AM, apply 15-min penalty
  * @param {boolean} isPenaltyDisabled - If true, no late check-in penalty is applied
  * @param {number} approvedOvertimeMinutes - Approved overtime duration from request
+ * @param {string} dateStr - Date string for policy cutoff check
  * @returns {{ lowTime: boolean, extraTime: boolean, lateCheckIn: boolean, penaltySeconds: number, completedOvertime: number, unfulfilledOvertime: number }}
  */
-export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0) => {
+export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0, dateStr = null) => {
   // Holiday rule: if employee works on a holiday, entire duration is overtime, no penalty
   if (isHolidayWork) {
     return {
@@ -146,9 +149,13 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
     unfulfilledOvertime = approvedOvertimeMinutes - completedOvertime;
   }
 
+  // Policy rule: Approved overtime request is required from April 6th onwards
+  const isPrePolicy = dateStr && dateStr < OVERTIME_POLICY_EFFECTIVE_DATE;
+  const overtimeAllowed = isPrePolicy || approvedOvertimeMinutes > 0;
+
   return {
     lowTime: workedMinutes > 0 && workedMinutes < standardMinNormal,
-    extraTime: approvedOvertimeMinutes > 0 && workedMinutes > standardMaxNormal,
+    extraTime: overtimeAllowed && workedMinutes > standardMaxNormal,
     lateCheckIn: late,
     penaltySeconds,
     completedOvertime,
