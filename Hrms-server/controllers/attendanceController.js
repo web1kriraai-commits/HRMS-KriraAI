@@ -103,7 +103,7 @@ export const clockOut = async (req, res) => {
     const standardBreaks = attendance.breaks.filter(b => b.type === 'Standard' && b.end);
     const hasCompletedFullBreak = standardBreaks.some(b => {
       const duration = Math.floor((new Date(b.end).getTime() - new Date(b.start).getTime()) / 1000);
-      return duration >= 120; // 20 minutes
+      return duration >= 1200; // 20 minutes
     });
 
     const isBreakPolicyActive = today >= COMPULSORY_BREAK_EFFECTIVE_DATE;
