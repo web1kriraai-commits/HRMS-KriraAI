@@ -50,6 +50,11 @@ export const requestLeave = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    // For Absence Resolution: allow status to be 'Approved' if specified in the request
+    // and it matches the resolution pattern.
+    const isResolution = reason && reason.includes('Resolution for unexcused absence');
+    const finalStatus = (isResolution && req.body.status === 'Approved') ? 'Approved' : 'Pending';
+
     const leaveRequest = new LeaveRequest({
       userId,
       userName: user.name,
@@ -58,7 +63,7 @@ export const requestLeave = async (req, res) => {
       category,
       reason,
       attachmentUrl: attachmentUrl || undefined,
-      status: 'Pending',
+      status: finalStatus,
       startTime: startTime || undefined,
       endTime: endTime || undefined
     });

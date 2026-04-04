@@ -83,16 +83,19 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
  * @param {boolean} isHolidayWork - If true, ALL worked time is overtime (no low time ever)
  * @param {string|Date|null} checkInTime - Check-in timestamp; if after 9:00 AM, apply 15-min penalty
  * @param {boolean} isPenaltyDisabled - If true, no late check-in penalty is applied
- * @returns {{ lowTime: boolean, extraTime: boolean, lateCheckIn: boolean, penaltySeconds: number }}
+ * @param {number} approvedOvertimeMinutes - Approved overtime duration from request
+ * @returns {{ lowTime: boolean, extraTime: boolean, lateCheckIn: boolean, penaltySeconds: number, completedOvertime: number, unfulfilledOvertime: number }}
  */
-export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false) => {
+export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0) => {
   // Holiday rule: if employee works on a holiday, entire duration is overtime, no penalty
   if (isHolidayWork) {
     return {
       lowTime: false,
       extraTime: workedSeconds > 0,
       lateCheckIn: false,
-      penaltySeconds: 0
+      penaltySeconds: 0,
+      completedOvertime: Math.floor(workedSeconds / 60),
+      unfulfilledOvertime: 0
     };
   }
 
@@ -122,26 +125,34 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
   const workedMinutes = (effectiveWorkedSeconds / 60) + extraTimeLeaveMinutes;
 
   // Use half-day threshold if approved, otherwise use normal range
-  if (isHalfDayApproved) {
-    // If Half-Day approved (4h leave), the remaining work target is:
-    // Low threshold: 8h 15m - 4h = 4h 15m (255 min)
-    // Extra threshold: 8h 22m - 4h = 4h 22m (262 min)
-    const halfMinNormal = MIN_NORMAL_MINUTES / 2; // 247.5
-    const halfMaxNormal = MAX_NORMAL_MINUTES / 2; // 251
-    return {
-      lowTime: workedMinutes > 0 && workedMinutes < halfMinNormal,
-      extraTime: workedMinutes > halfMaxNormal,
-      lateCheckIn: late,
-      penaltySeconds
-    };
+  const standardMinNormal = isHalfDayApproved ? (MIN_NORMAL_MINUTES / 2) : MIN_NORMAL_MINUTES;
+  const standardMaxNormal = isHalfDayApproved ? (MAX_NORMAL_MINUTES / 2) : MAX_NORMAL_MINUTES;
+  
+  // COMMITMENT RULE: Approved Overtime increases the target.
+  // We no longer trigger Low Time for incomplete overtime, only if they miss the standard minimum work time.
+  const targetMinutes = standardMaxNormal + approvedOvertimeMinutes;
+  
+  // Calculate completed and unfulfilled overtime
+  let completedOvertime = 0;
+  let unfulfilledOvertime = 0;
+  
+  if (approvedOvertimeMinutes > 0) {
+    if (workedMinutes > standardMaxNormal) {
+      completedOvertime = Math.floor(workedMinutes - standardMaxNormal);
+      if (completedOvertime > approvedOvertimeMinutes) {
+        completedOvertime = approvedOvertimeMinutes;
+      }
+    }
+    unfulfilledOvertime = approvedOvertimeMinutes - completedOvertime;
   }
 
-  // Normal logic: Normal = 8:15 to 8:22, Low < 8:15, Extra > 8:22
   return {
-    lowTime: workedMinutes > 0 && workedMinutes < MIN_NORMAL_MINUTES,
-    extraTime: workedMinutes > MAX_NORMAL_MINUTES,
+    lowTime: workedMinutes > 0 && workedMinutes < standardMinNormal,
+    extraTime: approvedOvertimeMinutes > 0 && workedMinutes > standardMaxNormal,
     lateCheckIn: late,
-    penaltySeconds
+    penaltySeconds,
+    completedOvertime,
+    unfulfilledOvertime
   };
 };
 

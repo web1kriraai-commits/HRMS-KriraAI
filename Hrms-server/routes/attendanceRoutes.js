@@ -17,7 +17,12 @@ import {
   adminAddManualHours,
   adminBulkAddManualHours,
   getAllAttendance,
-  getTodayAllAttendance
+  getTodayAllAttendance,
+  requestEarlyCheckout,
+  reviewEarlyCheckout,
+  submitOvertimeRequest,
+  getPendingOvertimeRequests,
+  reviewOvertimeRequest
 } from '../controllers/attendanceController.js';
 
 const router = express.Router();
@@ -33,6 +38,8 @@ router.post('/break/end', endBreak);
 router.post('/break/cancel', cancelBreak);
 router.get('/today', getTodayAttendance);
 router.get('/history', getAttendanceHistory);
+router.post('/request-early-checkout', requestEarlyCheckout);
+router.post('/request-overtime', submitOvertimeRequest);
 
 // Admin/HR routes
 router.get('/all', authorize('HR', 'Admin'), getAllAttendance);
@@ -43,6 +50,9 @@ router.post('/admin/bulk-manual-hours', authorize('HR', 'Admin'), adminBulkAddMa
 router.post('/admin/recalculate-holiday-flags', authorize('HR', 'Admin'), recalculateHolidayFlags);
 router.post('/admin/recalculate-halfday-flags', authorize('HR', 'Admin'), recalculateHalfDayFlags);
 router.post('/manual-hours', addManualHours);
+router.post('/admin/review-early-checkout/:recordId', authorize('HR', 'Admin'), reviewEarlyCheckout);
+router.get('/admin/pending-overtime', authorize('HR', 'Admin'), getPendingOvertimeRequests);
+router.post('/admin/review-overtime/:recordId', authorize('HR', 'Admin'), reviewOvertimeRequest);
 router.put('/:recordId', authorize('HR', 'Admin'), adminUpdateAttendance);
 router.delete('/:recordId', authorize('Admin'), deleteAttendance);
 

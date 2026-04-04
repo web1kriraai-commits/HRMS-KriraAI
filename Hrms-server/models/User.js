@@ -159,7 +159,21 @@ const userSchema = new mongoose.Schema({
     paidBy: {
       type: String // Name of admin/HR who marked it as paid
     }
-  }]
+  }],
+  lastForwardedMonth: {
+    type: String, // e.g. "2026-03"
+    trim: true
+  },
+  forwardedMonths: {
+    type: Map,
+    of: Number,
+    default: {}
+  },
+  forwardedInMonths: {
+    type: Map,
+    of: Number,
+    default: {}
+  }
 }, {
   timestamps: true
 });

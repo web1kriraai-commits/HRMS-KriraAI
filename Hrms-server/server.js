@@ -273,7 +273,8 @@ app.listen(PORT, async () => {
             extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
           }
 
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, !!(await CompanyHoliday.findOne({ date: record.date })));
+          const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, !!(await CompanyHoliday.findOne({ date: record.date })), record.checkIn, record.isPenaltyDisabled, approvedOT);
 
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;

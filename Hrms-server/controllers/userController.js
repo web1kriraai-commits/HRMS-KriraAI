@@ -1,6 +1,7 @@
 import User from '../models/User.js';
 import Attendance from '../models/Attendance.js';
 import LeaveRequest from '../models/LeaveRequest.js';
+import CompanyHoliday from '../models/CompanyHoliday.js';
 import { calculateWorkedSeconds, getFlags } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
@@ -276,7 +277,14 @@ export const deleteUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, email, department, paidLeaveAllocation, paidLeaveAction, manualPaidLeaveAdjustment, manualExtraTimeAdjustment, manualUnpaidLeaveAdjustment, manualHalfDayLeaveAdjustment, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, password } = req.body;
+    const { 
+      name, email, department, paidLeaveAllocation, paidLeaveAction, 
+      manualPaidLeaveAdjustment, manualExtraTimeAdjustment, 
+      manualUnpaidLeaveAdjustment, manualHalfDayLeaveAdjustment, 
+      joiningDate, bonds, aadhaarNumber, guardianName, 
+      mobileNumber, guardianMobileNumber, salaryBreakdown, password,
+      lastForwardedMonth, forwardedMonths, forwardedInMonths
+    } = req.body;
     const currentUser = req.user;
 
     console.log(`Update user ${id} request:`, { paidLeaveAllocation, paidLeaveAction, bodyAction: req.body.paidLeaveAction });
@@ -470,6 +478,17 @@ export const updateUser = async (req, res) => {
         };
       });
     }
+    
+    // Update forwarding data if provided
+    if (lastForwardedMonth !== undefined) {
+      user.lastForwardedMonth = lastForwardedMonth;
+    }
+    if (forwardedMonths !== undefined) {
+      user.forwardedMonths = forwardedMonths;
+    }
+    if (forwardedInMonths !== undefined) {
+      user.forwardedInMonths = forwardedInMonths;
+    }
 
     await user.save();
     const afterData = JSON.stringify({
@@ -546,57 +565,100 @@ export const getEmployeeStats = async (req, res) => {
     const employees = await User.find({ role: 'Employee', isActive: true })
       .select('-password');
 
+    // Fetch all holidays once
+    const holidays = await CompanyHoliday.find({}).lean();
+    const holidayDates = new Set(holidays.map(h => h.date));
+
     const stats = await Promise.all(employees.map(async (employee) => {
       const records = await Attendance.find({ userId: employee._id });
+      const leaves = await LeaveRequest.find({ userId: employee._id, status: 'Approved' });
 
       // Recalculate flags for records that have checkIn and checkOut
       for (const record of records) {
         if (record.checkIn && record.checkOut) {
           const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+          const isHoliday = holidayDates.has(record.date);
 
           // Check for half-day leave
-          const hasHalfDay = await LeaveRequest.findOne({
-            userId: record.userId,
-            startDate: record.date,
-            category: 'Half Day Leave',
-            status: 'Approved'
-          });
+          const hasHalfDay = leaves.find(l => l.startDate === record.date && l.category === 'Half Day Leave');
 
           // Check for Extra Time Leave
           let extraTimeLeaveMinutes = 0;
-          const extraTimeLeave = await LeaveRequest.findOne({
-            userId: record.userId,
-            startDate: record.date,
-            category: 'Extra Time Leave',
-            status: 'Approved'
-          });
+          const extraTimeLeave = leaves.find(l => l.startDate === record.date && l.category === 'Extra Time Leave');
 
           if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
             const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
             const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
-            const startMinutes = startH * 60 + startM;
-            const endMinutes = endH * 60 + endM;
-            extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+            extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
           }
 
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes);
+          const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT);
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;
           record.totalWorkedSeconds = worked;
+          // Note: totalWorkedSeconds in the DB usually has penalty subtracted. 
+          // attendanceUtils.getFlags returns penaltySeconds.
+          if (!isHoliday && flags.penaltySeconds > 0) {
+            record.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
+            record.penaltySeconds = flags.penaltySeconds;
+          }
           await record.save();
         }
       }
 
       const presentDays = records.length;
-      const totalWorkedSeconds = records.reduce((acc, r) => acc + r.totalWorkedSeconds, 0);
+      let totalWorkedSeconds = records.reduce((acc, r) => acc + (r.totalWorkedSeconds || 0), 0);
+
+      // --- ABENTEEISM LOGIC ---
+      // Determine working period (from joining date to today, or last 30 days)
+      // To keep it simple and consistent with frontend, we look at the range of existing records
+      // OR use the last 30 days. Let's use the current month for stats.
+      const now = new Date();
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const todayStr = now.toISOString().split('T')[0];
+      
+      let absentDaysCount = 0;
+      let absentDeficitSeconds = 0;
+      const absentDates = [];
+
+      // Create a Set of occupied dates (attendance or leave)
+      const occupiedDates = new Set();
+      records.forEach(r => occupiedDates.add(r.date));
+      leaves.forEach(l => {
+        // Simple range expansion for leaves
+        let curr = new Date(l.startDate);
+        const end = new Date(l.endDate);
+        while (curr <= end) {
+          occupiedDates.add(curr.toISOString().split('T')[0]);
+          curr.setDate(curr.getDate() + 1);
+        }
+      });
+
+      // Iterate through current month until today
+      let iter = new Date(startOfMonth);
+      const endIter = new Date();
+      const ABSENCE_PENALTY_EFFECTIVE_DATE = '2026-04-01';
+      while (iter <= endIter) {
+        const dateStr = iter.toISOString().split('T')[0];
+        const dayOfWeek = iter.getDay(); // 0 = Sunday
+
+        // Working day: Not Sunday and Not Holiday
+        if (dayOfWeek !== 0 && !holidayDates.has(dateStr)) {
+          if (!occupiedDates.has(dateStr)) {
+            // Apply rule ONLY on or after effective date
+            if (dateStr >= ABSENCE_PENALTY_EFFECTIVE_DATE) {
+              absentDaysCount++;
+              absentDeficitSeconds += (8.25 * 3600); // 8h 15m penalty
+              absentDates.push(dateStr);
+            }
+          }
+        }
+        iter.setDate(iter.getDate() + 1);
+      }
 
       const lowTimeCount = records.filter(r => r.lowTimeFlag).length;
       const extraTimeCount = records.filter(r => r.extraTimeFlag).length;
-
-      const leaves = await LeaveRequest.find({
-        userId: employee._id,
-        status: 'Approved'
-      });
 
       const leaveBreakdown = {
         paid: leaves.filter(l => l.category === 'Paid Leave').length,
@@ -615,7 +677,10 @@ export const getEmployeeStats = async (req, res) => {
           department: employee.department
         },
         presentDays,
-        totalWorkedHours: (totalWorkedSeconds / 3600).toFixed(1),
+        absentDaysCount,
+        absentDeficitSeconds,
+        absentDates,
+        totalWorkedHours: ((totalWorkedSeconds - absentDeficitSeconds) / 3600).toFixed(1),
         lowTimeCount,
         extraTimeCount,
         ...leaveBreakdown,

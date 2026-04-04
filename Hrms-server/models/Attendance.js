@@ -99,6 +99,33 @@ const attendanceSchema = new mongoose.Schema({
   lateCheckIn: {
     type: Boolean,
     default: false
+  },
+  earlyLogoutRequest: {
+    type: String,
+    enum: ['None', 'Pending', 'Approved', 'Rejected'],
+    default: 'None'
+  },
+  earlyLogoutRequestNote: {
+    type: String,
+    trim: true
+  },
+  isCompulsoryBreakDisabled: {
+    type: Boolean,
+    default: false
+  },
+  overtimeRequest: {
+    reason: { type: String, trim: true },
+    durationMinutes: { type: Number, default: 0 },
+    status: { 
+      type: String, 
+      enum: ['None', 'Pending', 'Approved', 'Rejected'], 
+      default: 'None' 
+    },
+    requestedAt: { type: Date },
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    approvedAt: { type: Date },
+    completedMinutes: { type: Number, default: 0 },
+    unfulfilledMinutes: { type: Number, default: 0 }
   }
 }, {
   timestamps: true
