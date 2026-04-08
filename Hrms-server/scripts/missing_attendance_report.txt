@@ -1,0 +1,43 @@
+==================================================
+MISSING ATTENDANCE REPORT
+==================================================
+
+Employee: Yash Gondaliya 
+Total Missing Days: 1
+Missing Dates: 18-03-2026
+--------------------------------------------------
+
+Employee: Jasamin Kachhadiya 
+Total Missing Days: 2
+Missing Dates: 03-02-2026, 10-02-2026
+--------------------------------------------------
+
+Employee: Priyanshi Paghadal 
+Total Missing Days: 1
+Missing Dates: 30-03-2026
+--------------------------------------------------
+
+Employee: Ujaval Savaliya 
+Total Missing Days: 5
+Missing Dates: 10-02-2026, 11-02-2026, 12-02-2026, 13-02-2026, 28-02-2026
+--------------------------------------------------
+
+Employee: Narendra Mali 
+Total Missing Days: 5
+Missing Dates: 06-02-2026, 10-02-2026, 11-02-2026, 28-02-2026, 04-04-2026
+--------------------------------------------------
+
+Employee: Shubh Patel 
+Total Missing Days: 3
+Missing Dates: 27-03-2026, 30-03-2026, 31-03-2026
+--------------------------------------------------
+
+Employee: Rupesh Garasodiya 
+Total Missing Days: 1
+Missing Dates: 04-04-2026
+--------------------------------------------------
+
+Employee: Rudra Sonani 
+Total Missing Days: 2
+Missing Dates: 31-03-2026, 07-04-2026
+--------------------------------------------------

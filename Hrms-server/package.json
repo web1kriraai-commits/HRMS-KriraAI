@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "init-db": "node scripts/initDB.js"
+    "init-db": "node scripts/initDB.js",
+    "add-emp-yesterday-815": "node scripts/add-employee-yesterday-815.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

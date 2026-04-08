@@ -25,6 +25,17 @@ export const clockIn = async (req, res) => {
     }
 
     const now = new Date();
+    
+    // Check-in Restriction: After 8:30 AM
+    // Exempt Admins
+    if (req.user.role !== 'Admin') {
+      const hours = now.getHours();
+      const minutes = now.getMinutes();
+      if (hours < 8 || (hours === 8 && minutes < 30)) {
+        return res.status(403).json({ message: 'Check-in is only allowed after 8:30 AM' });
+      }
+    }
+
     const isHoliday = await checkIsHoliday(today);
 
     // If a record already exists (e.g. created by admin as a waiver), use its isPenaltyDisabled flag
@@ -89,6 +100,17 @@ export const clockOut = async (req, res) => {
     }
 
     const now = new Date();
+
+    // Check-out Restriction: After 5:30 PM (17:30)
+    // Exempt Admins and Approved Early Logout
+    if (req.user.role !== 'Admin' && attendance.earlyLogoutRequest !== 'Approved') {
+      const hours = now.getHours();
+      const minutes = now.getMinutes();
+      if (hours < 17 || (hours === 17 && minutes < 30)) {
+        return res.status(403).json({ message: 'Check-out is only allowed after 5:30 PM' });
+      }
+    }
+
     const workedSecondsBeforeClockout = calculateWorkedSeconds(attendance, now.toISOString());
 
     // MANDATORY 8h 15m (29700 seconds) Check
@@ -892,8 +914,9 @@ export const getAllAttendance = async (req, res) => {
     const holidayDateSet = new Set(allHolidays.map(h => h.date));
 
     // Collect unique userIds and dates from records that need recalculation
-    const recordsToProcess = attendance.filter(r => r.checkIn && r.checkOut && !r.isManualFlag);
-    const userIds = [...new Set(recordsToProcess.map(r => r.userId?._id || r.userId))];
+    // Ensure r.userId exists to avoid TypeError if user was deleted
+    const recordsToProcess = attendance.filter(r => r.checkIn && r.checkOut && !r.isManualFlag && r.userId);
+    const userIds = [...new Set(recordsToProcess.map(r => (r.userId?._id || r.userId).toString()))];
     const datesToQuery = [...new Set(recordsToProcess.map(r => r.date))];
 
     // Bulk fetch ALL relevant leaves for these users and dates
@@ -919,8 +942,8 @@ export const getAllAttendance = async (req, res) => {
     for (const record of recordsToProcess) {
       const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
       const isHolidayWork = holidayDateSet.has(record.date);
-
-      const uid = (record.userId?._id || record.userId).toString();
+      const uid = (record.userId?._id || record.userId)?.toString();
+      if (!uid) continue; // Safety skip if still null
       const hasHalfDay = !!leavesByUserDate[`${uid}-${record.date}-Half Day Leave`];
 
       let extraTimeLeaveMinutes = 0;

@@ -26,6 +26,13 @@ export const requestLeave = async (req, res) => {
       });
     }
 
+    // Restriction: Employees and HR cannot take Extra Time Leave
+    if (category === 'Extra Time Leave' && req.user.role !== 'Admin') {
+      return res.status(403).json({
+        message: 'Extra Time Leave is no longer available for employees. Please use Paid or Unpaid Leave instead.'
+      });
+    }
+
     // Validate time fields for half day leave
     if (category === 'Half Day Leave') {
       if (!startTime) {

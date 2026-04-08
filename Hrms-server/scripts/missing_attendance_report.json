@@ -1,0 +1,177 @@
+[
+  {
+    "name": "Hit Kalariya",
+    "username": "hit kalariya",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Yash Gondaliya",
+    "username": "yash gondaliya",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-03-18"
+    ]
+  },
+  {
+    "name": "Jasamin Kachhadiya",
+    "username": "jasamin kachhadiya",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-02-03",
+      "2026-02-10"
+    ]
+  },
+  {
+    "name": "Priyanshi Paghadal",
+    "username": "priyanshi paghadal",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-03-30"
+    ]
+  },
+  {
+    "name": "Ujaval Savaliya",
+    "username": "ujaval savaliya",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-02-10",
+      "2026-02-11",
+      "2026-02-12",
+      "2026-02-13",
+      "2026-02-28"
+    ]
+  },
+  {
+    "name": "Rutika Savaliya",
+    "username": "rutika savaliya",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Jemil Nasit",
+    "username": "jemil nasit",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Tushar Sutariya",
+    "username": "tushar sutariya",
+    "startDate": "2026-01-21",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Narendra Mali",
+    "username": "narendra mali",
+    "startDate": "2026-01-19",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-02-06",
+      "2026-02-10",
+      "2026-02-11",
+      "2026-02-28",
+      "2026-04-04"
+    ]
+  },
+  {
+    "name": "Jenish Barvaliya",
+    "username": "jenish barvaliya",
+    "startDate": "2026-02-16",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Shubh Patel",
+    "username": "shubh patel",
+    "startDate": "2026-02-10",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-03-27",
+      "2026-03-30",
+      "2026-03-31"
+    ]
+  },
+  {
+    "name": "Suraj Prasad",
+    "username": "suraj patel",
+    "startDate": "2026-02-05",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Rupesh Garasodiya",
+    "username": "rupesh garasodiya",
+    "startDate": "2026-02-21",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-04-04"
+    ]
+  },
+  {
+    "name": "Harsh Patel",
+    "username": "harsh patel",
+    "startDate": "2026-03-07",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Kaushik Vaghasiya",
+    "username": "kaushik vaghasiya",
+    "startDate": "2026-03-02",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Bhargav Kikani",
+    "username": "bhargav kikani",
+    "startDate": "2026-03-24",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Rudra Sonani",
+    "username": "rudra sonani",
+    "startDate": "2026-03-24",
+    "startType": "First Check-in",
+    "missingDates": [
+      "2026-03-31",
+      "2026-04-07"
+    ]
+  },
+  {
+    "name": "Aditya Shrivastav",
+    "username": "aditya shrivastav",
+    "startDate": "2026-03-24",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Prashant Thakur",
+    "username": "prashant thakur",
+    "startDate": "2026-04-03",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Khyati Bhut",
+    "username": "khyati bhut",
+    "startDate": "2026-04-03",
+    "startType": "First Check-in",
+    "missingDates": []
+  },
+  {
+    "name": "Keval Solanki",
+    "username": "keval solanki",
+    "startDate": "2026-04-03",
+    "startType": "First Check-in",
+    "missingDates": []
+  }
+]
