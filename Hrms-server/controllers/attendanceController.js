@@ -2,7 +2,7 @@ import Attendance from '../models/Attendance.js';
 import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
 // Forced reload to clear potential nodemon cache issues.
@@ -38,10 +38,17 @@ export const clockIn = async (req, res) => {
 
     const isHoliday = await checkIsHoliday(today);
 
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId,
+      startDate: today,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+
     // If a record already exists (e.g. created by admin as a waiver), use its isPenaltyDisabled flag
     const isPenaltyDisabled = existing ? !!existing.isPenaltyDisabled : false;
 
-    const { lateCheckIn, penaltySeconds } = getFlags(0, false, 0, isHoliday, now, isPenaltyDisabled);
+    const { lateCheckIn, penaltySeconds } = getFlags(0, !!hasHalfDay, 0, isHoliday, now, isPenaltyDisabled);
 
     let attendance;
     if (existing) {
@@ -93,6 +100,13 @@ export const clockOut = async (req, res) => {
       return res.status(400).json({ message: 'Already clocked out today' });
     }
 
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId,
+      startDate: today,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+
     // Check for active break
     const activeBreak = attendance.breaks.find(b => !b.end);
     if (activeBreak) {
@@ -101,22 +115,25 @@ export const clockOut = async (req, res) => {
 
     const now = new Date();
 
-    // Check-out Restriction: After 5:30 PM (17:30)
-    // Exempt Admins and Approved Early Logout
-    if (req.user.role !== 'Admin' && attendance.earlyLogoutRequest !== 'Approved') {
-      const hours = now.getHours();
-      const minutes = now.getMinutes();
-      if (hours < 17 || (hours === 17 && minutes < 30)) {
-        return res.status(403).json({ message: 'Check-out is only allowed after 5:30 PM' });
-      }
+    if (!isClockOutTimeAllowed(now, {
+      hasHalfDayLeave: !!hasHalfDay,
+      earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
+      roleIsAdmin: req.user.role === 'Admin'
+    })) {
+      return res.status(403).json({ message: 'Check-out is only allowed after 5:30 PM' });
     }
 
     const workedSecondsBeforeClockout = calculateWorkedSeconds(attendance, now.toISOString());
 
-    // MANDATORY 8h 15m (29700 seconds) Check
-    if (workedSecondsBeforeClockout < 29700 && attendance.earlyLogoutRequest !== 'Approved') {
-      return res.status(403).json({ 
-        message: 'Shift not completed (8h 15m required). Please complete your shift or request an early checkout from an admin.',
+    if (!isWorkedSecondsSufficientForCheckout(workedSecondsBeforeClockout, {
+      hasHalfDayLeave: !!hasHalfDay,
+      earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved'
+    })) {
+      const msg = hasHalfDay
+        ? `Shift not completed (half-day minimum ${Math.round(HALF_DAY_MIN_SHIFT_SECONDS / 60)} minutes required). Complete your worked time or request an early checkout from an admin.`
+        : 'Shift not completed (8h 15m required). Please complete your shift or request an early checkout from an admin.';
+      return res.status(403).json({
+        message: msg,
         requiresRequest: true
       });
     }
@@ -129,7 +146,7 @@ export const clockOut = async (req, res) => {
     });
 
     const isBreakPolicyActive = today >= COMPULSORY_BREAK_EFFECTIVE_DATE;
-    if (!hasCompletedFullBreak && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive) {
+    if (!hasCompletedFullBreak && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay) {
       return res.status(403).json({ 
         message: 'Mandatory Break Policy: You must complete at least one 20-minute standard break before checking out.'
       });
@@ -140,14 +157,6 @@ export const clockOut = async (req, res) => {
 
     // Check if today is a company holiday
     const isHolidayWork = await checkIsHoliday(today);
-
-    // Check for half-day leave
-    const hasHalfDay = await LeaveRequest.findOne({
-      userId,
-      startDate: today,
-      category: 'Half Day Leave',
-      status: 'Approved'
-    });
 
     // Check for Extra Time Leave and calculate the hours
     // This allows: 1 hour leave + 7:15 work = 8:15 (normal time)
@@ -185,7 +194,7 @@ export const clockOut = async (req, res) => {
     await attendance.save();
 
     let logMessage = `Clocked out at ${today}`;
-    if (lateCheckIn) {
+    if (lateCheckIn && penaltySeconds > 0) {
       logMessage += ` (Late Check-in Penalty: ${Math.round(penaltySeconds / 60)} minutes)`;
     }
 
@@ -266,9 +275,16 @@ export const endBreak = async (req, res) => {
     const now = new Date();
     const durationSeconds = Math.max(0, (now.getTime() - activeBreak.start.getTime()) / 1000);
 
-    // ENFORCE 20 MINUTE BREAK (1200 seconds) - Only from April 6th
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId,
+      startDate: attendance.date,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+
+    // ENFORCE 20 MINUTE BREAK (1200 seconds) - Only from April 6th; not on approved half-day leave days
     const isBreakPolicyActive = attendance.date >= COMPULSORY_BREAK_EFFECTIVE_DATE;
-    if (durationSeconds < 1200 && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive) {
+    if (durationSeconds < 1200 && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay) {
       const remainingSeconds = Math.ceil(1200 - durationSeconds);
       const remainingMinutes = Math.ceil(remainingSeconds / 60);
       return res.status(400).json({ 
@@ -666,12 +682,7 @@ export const adminCreateAttendance = async (req, res) => {
     await attendance.save();
 
     let logMessage = `Created attendance record for ${date}`;
-    // Reuse flags or calculate if needed for logging
-    if (!flags && checkInDate && checkOutDate) {
-      flags = getFlags(calculateWorkedSeconds(attendance), false, 0, await checkIsHoliday(date), checkInDate, !!isPenaltyDisabled);
-    }
-
-    if (flags && flags.lateCheckIn) {
+    if (flags && flags.lateCheckIn && flags.penaltySeconds > 0) {
       logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
     }
 

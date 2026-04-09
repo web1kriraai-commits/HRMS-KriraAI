@@ -4,10 +4,13 @@
 // Extra Time: worked > 8:22 (> 502 minutes)
 // Half-day: normal = 4h 15m (255 min) to 4h 22m (262 min). Low < 4h 15m, Extra > 4h 22m
 // Holiday Work: ALL worked time counts as overtime (extraTime), no lowTime ever
-// Late Check-in Penalty: if checkIn > 09:00 AM, deduct 15 minutes from effective worked time
+// Late Check-in Penalty: if checkIn > 09:00 AM, deduct from effective worked time (skipped when half-day leave approved that day)
 
 const MIN_NORMAL_MINUTES = 495; // 8h 15m (lower bound for normal)
 const MAX_NORMAL_MINUTES = 502; // 8h 22m (upper bound for normal)
+/** Minimum net worked time to complete a shift on a half-day leave day (matches standardMinNormal). */
+export const HALF_DAY_MIN_SHIFT_SECONDS = Math.floor(MIN_NORMAL_MINUTES / 2) * 60;
+export const FULL_DAY_MIN_SHIFT_SECONDS = MIN_NORMAL_MINUTES * 60;
 const HALF_DAY_THRESHOLD_MINUTES = 240; // 4h 0m (standard half-day duration)
 const LATE_CHECKIN_HOUR = 9; // 9:00 AM cutoff
 export const MIN_LATE_PENALTY_SECONDS = 15 * 60; // 900 seconds = 15 minutes
@@ -83,7 +86,7 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
  * @param {boolean} isHalfDayApproved - Whether a half-day leave is approved for this day
  * @param {number} extraTimeLeaveMinutes - Additional minutes from Extra Time Leave
  * @param {boolean} isHolidayWork - If true, ALL worked time is overtime (no low time ever)
- * @param {string|Date|null} checkInTime - Check-in timestamp; if after 9:00 AM, apply 15-min penalty
+ * @param {string|Date|null} checkInTime - Check-in timestamp; if after 9:00 AM, apply late penalty (unless half-day approved)
  * @param {boolean} isPenaltyDisabled - If true, no late check-in penalty is applied
  * @param {number} approvedOvertimeMinutes - Approved overtime duration from request
  * @param {string} dateStr - Date string for policy cutoff check
@@ -107,7 +110,8 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
   const late = isLateCheckIn(checkInTime);
   let penaltySeconds = 0;
 
-  if (late && checkInTime && !isPenaltyDisabled) {
+  // Half-day leave: no late check-in penalty for that date (low-time uses halved thresholds separately)
+  if (late && checkInTime && !isPenaltyDisabled && !isHalfDayApproved) {
     const d = new Date(checkInTime);
     // Format to YYYY-MM-DD for comparison
     const year = d.getFullYear();
@@ -165,4 +169,31 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
 
 export const getTodayStr = () => {
   return new Date().toISOString().split('T')[0];
+};
+
+/**
+ * Non-admin: checkout normally only from 17:30 onward.
+ * Half-day leave or approved early logout allows checkout before 17:30 (same rules as clockOut).
+ */
+export const isClockOutTimeAllowed = (
+  now,
+  { hasHalfDayLeave = false, earlyLogoutApproved = false, roleIsAdmin = false } = {}
+) => {
+  if (roleIsAdmin || earlyLogoutApproved) return true;
+  if (hasHalfDayLeave) return true;
+  const h = now.getHours();
+  const m = now.getMinutes();
+  return h > 17 || (h === 17 && m >= 30);
+};
+
+/**
+ * Minimum net worked time for checkout. Approved early logout bypasses (admin still must meet minimum).
+ */
+export const isWorkedSecondsSufficientForCheckout = (
+  workedSeconds,
+  { hasHalfDayLeave = false, earlyLogoutApproved = false } = {}
+) => {
+  if (earlyLogoutApproved) return true;
+  const min = hasHalfDayLeave ? HALF_DAY_MIN_SHIFT_SECONDS : FULL_DAY_MIN_SHIFT_SECONDS;
+  return workedSeconds >= min;
 };

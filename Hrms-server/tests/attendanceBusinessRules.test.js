@@ -52,11 +52,11 @@ runTest("Low Time (< 8:15)", () => {
         `Expected lowTime:true, got lowTime:${flags.lowTime}`);
 });
 
-// Scenario 3: Extra Time (> 8:22)
+// Scenario 3: Extra Time (> 8:22) — dateStr before overtime policy so extra time does not require an OT request
 runTest("Extra Time (> 8:22)", () => {
     const checkIn = "2026-03-01T09:00:00";
     const workedSeconds = 503 * 60; // 8h 23m
-    const flags = getFlags(workedSeconds, false, 0, false, checkIn);
+    const flags = getFlags(workedSeconds, false, 0, false, checkIn, false, 0, "2026-03-01");
 
     return assert(flags.extraTime === true && flags.lowTime === false,
         `Expected extraTime:true, got extraTime:${flags.extraTime}`);
@@ -125,6 +125,16 @@ runTest("Extra Time Full Day Leave (comping 0h worked)", () => {
     // If workedSeconds=0, penalty makes it negative (clamped to 0). 0 + 495 = 495 (Normal)
     return assert(flags.lowTime === false && flags.extraTime === false,
         `Expected normal, got lowTime:${flags.lowTime}, extraTime:${flags.extraTime}`);
+});
+
+// Scenario 8b: Half day — late check-in incurs no penalty
+runTest("Half Day Leave: no late check-in penalty", () => {
+    const checkIn = "2026-03-01T10:30:00";
+    const workedSeconds = 500 * 60;
+    const flags = getFlags(workedSeconds, true, 0, false, checkIn);
+
+    return assert(flags.penaltySeconds === 0 && flags.lateCheckIn === true,
+        `Expected 0 penalty when half-day approved, got penalty:${flags.penaltySeconds}`);
 });
 
 // Scenario 9: Approved Half Day Leave Logic (Thresholds halved)
