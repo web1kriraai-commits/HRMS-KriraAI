@@ -8,7 +8,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "init-db": "node scripts/initDB.js",
-    "add-emp-yesterday-815": "node scripts/add-employee-yesterday-815.js"
+    "add-emp-yesterday-815": "node scripts/add-employee-yesterday-815.js",
+    "test:checkin-window": "node scripts/test-earliest-checkin.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -23,6 +23,31 @@ const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '365d' });
 };
 
+/** Fields needed by the client dashboard (leave balances, paid-leave gate). */
+const userToAuthPayload = (user) => ({
+  id: user._id,
+  name: user.name,
+  username: user.username,
+  email: user.email,
+  role: user.role,
+  department: user.department,
+  isActive: user.isActive,
+  isFirstLogin: user.isFirstLogin,
+  lastLogin: user.lastLogin,
+  aadhaarNumber: user.aadhaarNumber,
+  guardianName: user.guardianName,
+  mobileNumber: user.mobileNumber,
+  guardianMobileNumber: user.guardianMobileNumber,
+  joiningDate: user.joiningDate,
+  paidLeaveAllocation: user.paidLeaveAllocation ?? 0,
+  paidLeaveLastAllocatedDate: user.paidLeaveLastAllocatedDate,
+  manualPaidLeaveAdjustment: user.manualPaidLeaveAdjustment ?? 0,
+  manualExtraTimeAdjustment: user.manualExtraTimeAdjustment ?? 0,
+  manualUnpaidLeaveAdjustment: user.manualUnpaidLeaveAdjustment ?? 0,
+  manualHalfDayLeaveAdjustment: user.manualHalfDayLeaveAdjustment ?? 0,
+  paidLeaveAccess: user.paidLeaveAccess !== false
+});
+
 export const login = async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -71,20 +96,7 @@ export const login = async (req, res) => {
 
     res.json({
       token: generateToken(user._id),
-      user: {
-        id: user._id,
-        name: user.name,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        department: user.department,
-        isActive: user.isActive,
-        isFirstLogin: user.isFirstLogin,
-        lastLogin: user.lastLogin,
-        aadhaarNumber: user.aadhaarNumber,
-        guardianName: user.guardianName,
-        mobileNumber: user.mobileNumber
-      },
+      user: userToAuthPayload(user),
       requiresPasswordChange: user.isFirstLogin || false
     });
   } catch (error) {
@@ -122,20 +134,7 @@ export const getCurrentUser = async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select('-password');
     res.json({
-      user: {
-        id: user._id,
-        name: user.name,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        department: user.department,
-        isActive: user.isActive,
-        isFirstLogin: user.isFirstLogin,
-        lastLogin: user.lastLogin,
-        aadhaarNumber: user.aadhaarNumber,
-        guardianName: user.guardianName,
-        mobileNumber: user.mobileNumber
-      }
+      user: userToAuthPayload(user)
     });
   } catch (error) {
     console.error('Get current user error:', error);
@@ -372,20 +371,7 @@ export const verifyAdminLoginOTP = async (req, res) => {
 
     res.json({
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        department: user.department,
-        isActive: user.isActive,
-        isFirstLogin: user.isFirstLogin,
-        lastLogin: user.lastLogin,
-        aadhaarNumber: user.aadhaarNumber,
-        guardianName: user.guardianName,
-        mobileNumber: user.mobileNumber
-      }
+      user: userToAuthPayload(user)
     });
 
   } catch (error) {

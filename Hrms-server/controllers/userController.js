@@ -47,7 +47,7 @@ const formatDateToDDMMYYYY = (dateStr) => {
 
 export const createUser = async (req, res) => {
   try {
-    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown } = req.body;
+    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, paidLeaveAccess } = req.body;
     const currentUser = req.user;
 
     // Convert dates to dd-mm-yyyy format if provided
@@ -164,6 +164,10 @@ export const createUser = async (req, res) => {
       guardianMobileNumber: guardianMobileNumber || undefined,
       paidLeaveAllocation: 0,
     });
+
+    if (currentUser.role === 'Admin' && paidLeaveAccess !== undefined) {
+      user.paidLeaveAccess = Boolean(paidLeaveAccess);
+    }
 
     try {
       await user.save();
@@ -283,7 +287,8 @@ export const updateUser = async (req, res) => {
       manualUnpaidLeaveAdjustment, manualHalfDayLeaveAdjustment, 
       joiningDate, bonds, aadhaarNumber, guardianName, 
       mobileNumber, guardianMobileNumber, salaryBreakdown, password,
-      lastForwardedMonth, forwardedMonths, forwardedInMonths
+      lastForwardedMonth, forwardedMonths, forwardedInMonths,
+      paidLeaveAccess
     } = req.body;
     const currentUser = req.user;
 
@@ -353,6 +358,13 @@ export const updateUser = async (req, res) => {
     // Update guardian mobile number if provided
     if (guardianMobileNumber !== undefined) {
       user.guardianMobileNumber = guardianMobileNumber.trim() || undefined;
+    }
+
+    if (paidLeaveAccess !== undefined) {
+      if (currentUser.role !== 'Admin') {
+        return res.status(403).json({ message: 'Only Admin can change paid leave access' });
+      }
+      user.paidLeaveAccess = Boolean(paidLeaveAccess);
     }
 
     // Update paid leave allocation

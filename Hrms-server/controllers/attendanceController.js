@@ -2,7 +2,8 @@ import Attendance from '../models/Attendance.js';
 import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout } from '../utils/attendanceUtils.js';
+import SystemSettings from '../models/SystemSettings.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
 // Forced reload to clear potential nodemon cache issues.
@@ -25,14 +26,13 @@ export const clockIn = async (req, res) => {
     }
 
     const now = new Date();
-    
-    // Check-in Restriction: After 8:30 AM
-    // Exempt Admins
+
+    // Check-in only from 8:30 AM onward (company timezone). Admins exempt.
     if (req.user.role !== 'Admin') {
-      const hours = now.getHours();
-      const minutes = now.getMinutes();
-      if (hours < 8 || (hours === 8 && minutes < 30)) {
-        return res.status(403).json({ message: 'Check-in is only allowed after 8:30 AM' });
+      const settings = await SystemSettings.getSettings();
+      const tz = settings?.timezone || 'Asia/Kolkata';
+      if (!isClockInTimeAllowed(now, tz)) {
+        return res.status(403).json({ message: 'Check-in is only allowed from 8:30 AM (company time)' });
       }
     }
 

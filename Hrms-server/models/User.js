@@ -65,6 +65,11 @@ const userSchema = new mongoose.Schema({
   lastLogin: {
     type: Date
   },
+  /** When false, employee cannot request paid leave or half-day as paid (unpaid only). Default true for existing users. */
+  paidLeaveAccess: {
+    type: Boolean,
+    default: true
+  },
   paidLeaveAllocation: {
     type: Number,
     default: 0 // Additional allocation added by admin (starts at 0, added to default)

@@ -13,6 +13,37 @@ export const HALF_DAY_MIN_SHIFT_SECONDS = Math.floor(MIN_NORMAL_MINUTES / 2) * 6
 export const FULL_DAY_MIN_SHIFT_SECONDS = MIN_NORMAL_MINUTES * 60;
 const HALF_DAY_THRESHOLD_MINUTES = 240; // 4h 0m (standard half-day duration)
 const LATE_CHECKIN_HOUR = 9; // 9:00 AM cutoff
+/** Earliest time employees may clock in (non-admin), in company local time */
+export const EARLIEST_CHECK_IN_HOUR = 8;
+export const EARLIEST_CHECK_IN_MINUTE = 30;
+
+/**
+ * @param {Date} now
+ * @param {string} [timeZone='Asia/Kolkata'] IANA timezone
+ * @returns {boolean} true if clock-in is allowed at this moment in that zone
+ */
+export const isClockInTimeAllowed = (now, timeZone = 'Asia/Kolkata') => {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false
+    });
+    const parts = formatter.formatToParts(now);
+    const hour = parseInt(parts.find((p) => p.type === 'hour').value, 10);
+    const minute = parseInt(parts.find((p) => p.type === 'minute').value, 10);
+    if (hour < EARLIEST_CHECK_IN_HOUR) return false;
+    if (hour === EARLIEST_CHECK_IN_HOUR && minute < EARLIEST_CHECK_IN_MINUTE) return false;
+    return true;
+  } catch {
+    const h = now.getHours();
+    const m = now.getMinutes();
+    if (h < EARLIEST_CHECK_IN_HOUR) return false;
+    if (h === EARLIEST_CHECK_IN_HOUR && m < EARLIEST_CHECK_IN_MINUTE) return false;
+    return true;
+  }
+};
 export const MIN_LATE_PENALTY_SECONDS = 15 * 60; // 900 seconds = 15 minutes
 const PENALTY_EFFECTIVE_DATE = '2026-03-01'; // Apply to current records
 export const OVERTIME_POLICY_EFFECTIVE_DATE = '2026-04-06';

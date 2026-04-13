@@ -57,6 +57,23 @@ export const requestLeave = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    const canUsePaidLeave = user.paidLeaveAccess !== false;
+    if (!canUsePaidLeave) {
+      if (category === 'Paid Leave') {
+        return res.status(403).json({
+          message: 'Paid leave is not enabled for your account. Please use Unpaid Leave or contact your administrator.'
+        });
+      }
+      if (category === 'Half Day Leave') {
+        const r = (reason || '').trim();
+        if (r.startsWith('[Paid Leave]')) {
+          return res.status(403).json({
+            message: 'Paid leave is not enabled for your account. Use half-day as Unpaid or contact your administrator.'
+          });
+        }
+      }
+    }
+
     // For Absence Resolution: allow status to be 'Approved' if specified in the request
     // and it matches the resolution pattern.
     const isResolution = reason && reason.includes('Resolution for unexcused absence');
