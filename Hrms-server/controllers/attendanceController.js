@@ -1538,13 +1538,52 @@ export const submitOvertimeRequest = async (req, res) => {
       return res.status(400).json({ message: 'Overtime request already exists for today' });
     }
 
-    // Verify worked time >= 8h 22m (30120 seconds)
-    // Use current time as prospective checkout if still active
+    // Eligible when net worked time (same rules as getFlags) exceeds the "normal" band:
+    // full day > 8h 22m; half-day leave day > half of that; holiday: any work; Extra Time Leave adds credit minutes.
     const nowStr = new Date().toISOString();
     const workedSeconds = calculateWorkedSeconds(attendance, attendance.checkOut ? attendance.checkOut.toISOString() : nowStr);
-    
-    if (workedSeconds < 30120) {
-      return res.status(400).json({ message: 'Overtime request only allowed after 8 hours and 22 minutes of work' });
+
+    const isHolidayWork = await checkIsHoliday(targetDate);
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId,
+      startDate: targetDate,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+
+    let extraTimeLeaveMinutes = 0;
+    const extraTimeLeave = await LeaveRequest.findOne({
+      userId,
+      startDate: targetDate,
+      category: 'Extra Time Leave',
+      status: 'Approved'
+    });
+    if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
+      const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+      const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+      const startMinutes = startH * 60 + startM;
+      const endMinutes = endH * 60 + endM;
+      extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
+    }
+
+    // Pre-policy date so extraTime reflects only "worked past normal" (not the April 6+ approved-OT rule)
+    const flags = getFlags(
+      workedSeconds,
+      !!hasHalfDay,
+      extraTimeLeaveMinutes,
+      isHolidayWork,
+      attendance.checkIn,
+      attendance.isPenaltyDisabled,
+      0,
+      '2026-04-05'
+    );
+    if (!flags.extraTime) {
+      const msg = isHolidayWork
+        ? 'No worked time to request as overtime for this day'
+        : (hasHalfDay
+          ? 'Overtime request is only available after you exceed half-day normal hours (per policy, same as extra time)'
+          : 'Overtime request only allowed after 8 hours and 22 minutes of work (or equivalent with Extra Time Leave credit)');
+      return res.status(400).json({ message: msg });
     }
 
     attendance.overtimeRequest = {
