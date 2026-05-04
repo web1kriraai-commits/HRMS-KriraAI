@@ -27,16 +27,16 @@ export const clockIn = async (req, res) => {
 
     const now = new Date();
 
+    const isHoliday = await checkIsHoliday(today);
+
     // Check-in only from 8:30 AM onward (company timezone). Admins exempt.
     if (req.user.role !== 'Admin') {
       const settings = await SystemSettings.getSettings();
       const tz = settings?.timezone || 'Asia/Kolkata';
-      if (!isClockInTimeAllowed(now, tz)) {
+      if (!isClockInTimeAllowed(now, tz, isHoliday)) {
         return res.status(403).json({ message: 'Check-in is only allowed from 8:30 AM (company time)' });
       }
     }
-
-    const isHoliday = await checkIsHoliday(today);
 
     const hasHalfDay = await LeaveRequest.findOne({
       userId,
@@ -115,10 +115,13 @@ export const clockOut = async (req, res) => {
 
     const now = new Date();
 
+    const isHoliday = await checkIsHoliday(today);
+
     if (!isClockOutTimeAllowed(now, {
       hasHalfDayLeave: !!hasHalfDay,
       earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
-      roleIsAdmin: req.user.role === 'Admin'
+      roleIsAdmin: req.user.role === 'Admin',
+      isHoliday: isHoliday
     })) {
       return res.status(403).json({ message: 'Check-out is only allowed after 5:30 PM' });
     }
@@ -127,7 +130,8 @@ export const clockOut = async (req, res) => {
 
     if (!isWorkedSecondsSufficientForCheckout(workedSecondsBeforeClockout, {
       hasHalfDayLeave: !!hasHalfDay,
-      earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved'
+      earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
+      isHoliday: isHoliday
     })) {
       const msg = hasHalfDay
         ? `Shift not completed (half-day minimum ${Math.round(HALF_DAY_MIN_SHIFT_SECONDS / 60)} minutes required). Complete your worked time or request an early checkout from an admin.`
@@ -146,7 +150,7 @@ export const clockOut = async (req, res) => {
     });
 
     const isBreakPolicyActive = today >= COMPULSORY_BREAK_EFFECTIVE_DATE;
-    if (!hasCompletedFullBreak && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay) {
+    if (!hasCompletedFullBreak && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay && !isHoliday) {
       return res.status(403).json({ 
         message: 'Mandatory Break Policy: You must complete at least one 20-minute standard break before checking out.'
       });
@@ -156,7 +160,7 @@ export const clockOut = async (req, res) => {
     const worked = workedSecondsBeforeClockout;
 
     // Check if today is a company holiday
-    const isHolidayWork = await checkIsHoliday(today);
+    const isHolidayWork = isHoliday;
 
     // Check for Extra Time Leave and calculate the hours
     // This allows: 1 hour leave + 7:15 work = 8:15 (normal time)
@@ -283,8 +287,9 @@ export const endBreak = async (req, res) => {
     });
 
     // ENFORCE 20 MINUTE BREAK (1200 seconds) - Only from April 6th; not on approved half-day leave days
+    const isHoliday = await checkIsHoliday(attendance.date);
     const isBreakPolicyActive = attendance.date >= COMPULSORY_BREAK_EFFECTIVE_DATE;
-    if (durationSeconds < 1200 && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay) {
+    if (durationSeconds < 1200 && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay && !isHoliday) {
       const remainingSeconds = Math.ceil(1200 - durationSeconds);
       const remainingMinutes = Math.ceil(remainingSeconds / 60);
       return res.status(400).json({ 
@@ -1113,13 +1118,20 @@ export const recalculateHolidayFlags = async (req, res) => {
     for (const record of records) {
       const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
 
-      // On a holiday: all worked time is overtime, no lowTime
-      const flags = getFlags(worked, false, 0, true, null, record.isPenaltyDisabled);
+      // On a holiday: all worked time is overtime, no lowTime, NO penalties
+      const flags = getFlags(worked, false, 0, true, record.checkIn, record.isPenaltyDisabled);
 
-      const wasChanged = record.lowTimeFlag !== flags.lowTime || record.extraTimeFlag !== flags.extraTime;
+      const wasChanged = record.lowTimeFlag !== flags.lowTime || 
+                         record.extraTimeFlag !== flags.extraTime ||
+                         record.penaltySeconds !== flags.penaltySeconds ||
+                         record.lateCheckIn !== flags.lateCheckIn ||
+                         record.totalWorkedSeconds !== worked;
+
       if (wasChanged) {
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
+        record.penaltySeconds = flags.penaltySeconds;
+        record.lateCheckIn = flags.lateCheckIn;
         record.totalWorkedSeconds = worked;
         await record.save();
         updatedCount++;

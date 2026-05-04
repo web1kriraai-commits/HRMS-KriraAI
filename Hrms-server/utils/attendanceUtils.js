@@ -20,9 +20,11 @@ export const EARLIEST_CHECK_IN_MINUTE = 30;
 /**
  * @param {Date} now
  * @param {string} [timeZone='Asia/Kolkata'] IANA timezone
+ * @param {boolean} [isHoliday=false] Whether today is a company holiday
  * @returns {boolean} true if clock-in is allowed at this moment in that zone
  */
-export const isClockInTimeAllowed = (now, timeZone = 'Asia/Kolkata') => {
+export const isClockInTimeAllowed = (now, timeZone = 'Asia/Kolkata', isHoliday = false) => {
+  if (isHoliday) return true;
   try {
     const formatter = new Intl.DateTimeFormat('en-GB', {
       timeZone,
@@ -208,9 +210,9 @@ export const getTodayStr = () => {
  */
 export const isClockOutTimeAllowed = (
   now,
-  { hasHalfDayLeave = false, earlyLogoutApproved = false, roleIsAdmin = false } = {}
+  { hasHalfDayLeave = false, earlyLogoutApproved = false, roleIsAdmin = false, isHoliday = false } = {}
 ) => {
-  if (roleIsAdmin || earlyLogoutApproved) return true;
+  if (roleIsAdmin || earlyLogoutApproved || isHoliday) return true;
   if (hasHalfDayLeave) return true;
   const h = now.getHours();
   const m = now.getMinutes();
@@ -222,9 +224,9 @@ export const isClockOutTimeAllowed = (
  */
 export const isWorkedSecondsSufficientForCheckout = (
   workedSeconds,
-  { hasHalfDayLeave = false, earlyLogoutApproved = false } = {}
+  { hasHalfDayLeave = false, earlyLogoutApproved = false, isHoliday = false } = {}
 ) => {
-  if (earlyLogoutApproved) return true;
+  if (earlyLogoutApproved || isHoliday) return true;
   const min = hasHalfDayLeave ? HALF_DAY_MIN_SHIFT_SECONDS : FULL_DAY_MIN_SHIFT_SECONDS;
   return workedSeconds >= min;
 };
