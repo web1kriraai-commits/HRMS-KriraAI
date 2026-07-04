@@ -38,7 +38,7 @@ const auditLogSchema = new mongoose.Schema({
 });
 
 // Index for faster queries
-auditLogSchema.index({ timestamp: -1 });
+auditLogSchema.index({ createdAt: -1 });
 auditLogSchema.index({ actorId: 1 });
 
 export default mongoose.model('AuditLog', auditLogSchema);
