@@ -295,26 +295,12 @@ export const startBreak = async (req, res) => {
       return res.status(400).json({ message: 'Break already in progress' });
     }
 
-    // Enforce only one standard break per day
-    if (type === 'Standard') {
-      const hasStandardBreak = attendance.breaks.some(b => b.type === 'Standard' && b.end);
-      if (hasStandardBreak) {
-        return res.status(400).json({ message: 'Standard break already taken today. Please use Extra Break for additional breaks.' });
-      }
-    }
-
-    // Require reason for extra breaks
-    if (type === 'Extra' && !reason) {
-      return res.status(400).json({ message: 'Reason is required for extra breaks' });
-    }
-
     const breakData = {
       start: new Date(),
-      type
+      type: type === 'Extra' ? 'Standard' : type
     };
 
-    // Add reason only for extra breaks
-    if (type === 'Extra' && reason) {
+    if (reason?.trim()) {
       breakData.reason = reason.trim();
     }
     
@@ -389,7 +375,16 @@ export const getTodayAttendance = async (req, res) => {
     const today = getTodayStr();
 
     const attendance = await Attendance.findOne({ userId, date: today });
-    res.json(attendance ? toAttendanceResponse(attendance) : null);
+    if (!attendance) {
+      return res.json(null);
+    }
+
+    const response = toAttendanceResponse(attendance);
+    if (attendance.checkIn && !attendance.checkOut) {
+      const liveWorkedSeconds = calculateWorkedSeconds(attendance, new Date().toISOString());
+      response.liveWorkedSeconds = Math.max(0, liveWorkedSeconds);
+    }
+    res.json(response);
   } catch (error) {
     console.error('Get today attendance error:', error);
     res.status(500).json({ message: 'Server error' });
