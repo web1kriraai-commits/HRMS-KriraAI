@@ -20,7 +20,7 @@ const settingsToJson = (settings) => ({
   checkInTimeOverrides: normalizeOverridesToObject(settings.checkInTimeOverrides),
   defaultCheckoutTime: settings.defaultCheckoutTime || '17:30',
   checkoutTimeOverrides: normalizeOverridesToObject(settings.checkoutTimeOverrides),
-  latePenaltyStartTime: settings.latePenaltyStartTime || '09:00'
+  latePenaltyStartTime: settings.latePenaltyStartTime || '09:15'
 });
 
 export const getSettings = async (req, res) => {

@@ -620,7 +620,6 @@ export const getEmployeeStats = async (req, res) => {
     const holidays = await CompanyHoliday.find({}).lean();
     const holidayDates = new Set(holidays.map(h => h.date));
     const systemSettings = await SystemSettings.getSettings();
-    const latePenaltyStartTime = resolveLatePenaltyStartTime(systemSettings);
 
     const stats = await Promise.all(employees.map(async (employee) => {
       const records = await Attendance.find({ userId: employee._id });
@@ -646,7 +645,7 @@ export const getEmployeeStats = async (req, res) => {
           }
 
           const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, latePenaltyStartTime, systemSettings?.timezone || 'Asia/Kolkata');
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, resolveLatePenaltyStartTime(systemSettings, record.date), systemSettings?.timezone || 'Asia/Kolkata');
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;
           record.totalWorkedSeconds = worked;

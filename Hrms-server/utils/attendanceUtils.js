@@ -13,7 +13,11 @@ const MAX_NORMAL_MINUTES = 502; // 8h 22m (upper bound for normal)
 export const HALF_DAY_MIN_SHIFT_SECONDS = Math.floor(MIN_NORMAL_MINUTES / 2) * 60;
 export const FULL_DAY_MIN_SHIFT_SECONDS = MIN_NORMAL_MINUTES * 60;
 const HALF_DAY_THRESHOLD_MINUTES = 240; // 4h 0m (standard half-day duration)
-export const DEFAULT_LATE_PENALTY_START_TIME = '09:00';
+export const LEGACY_LATE_PENALTY_START_TIME = '09:00';
+export const CURRENT_LATE_PENALTY_START_TIME = '09:15';
+/** From this date (YYYY-MM-DD, company calendar) penalty starts after 09:15; before uses 09:00. */
+export const LATE_PENALTY_915_EFFECTIVE_DATE = '2026-07-06';
+export const DEFAULT_LATE_PENALTY_START_TIME = CURRENT_LATE_PENALTY_START_TIME;
 /** Earliest time employees may clock in (non-admin), in company local time */
 export const EARLIEST_CHECK_IN_HOUR = 8;
 export const EARLIEST_CHECK_IN_MINUTE = 30;
@@ -42,11 +46,20 @@ export const COMPULSORY_BREAK_EFFECTIVE_DATE = '2026-04-06';
 /** Minimum combined Break + Extra Break time required before checkout (20 minutes). */
 export const MIN_TOTAL_BREAK_SECONDS = 1200;
 
-export const resolveLatePenaltyStartTime = (settings) =>
-  settings?.latePenaltyStartTime || DEFAULT_LATE_PENALTY_START_TIME;
+/**
+ * Penalty cutoff for a given attendance date.
+ * Before LATE_PENALTY_915_EFFECTIVE_DATE → 09:00; on/after → settings or 09:15.
+ */
+export const resolveLatePenaltyStartTime = (settings, dateStr) => {
+  const normalizedDate = dateStr ? String(dateStr).slice(0, 10) : null;
+  if (normalizedDate && normalizedDate < LATE_PENALTY_915_EFFECTIVE_DATE) {
+    return LEGACY_LATE_PENALTY_START_TIME;
+  }
+  return settings?.latePenaltyStartTime || CURRENT_LATE_PENALTY_START_TIME;
+};
 
 /**
- * Returns true if checkInTime is after the configured penalty start time (default 09:00:00).
+ * Returns true if checkInTime is after the configured penalty start time (default 09:15:00).
  */
 export const isLateCheckIn = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME, timeZone = 'Asia/Kolkata') => {
   if (!checkInTime) return false;
@@ -58,7 +71,7 @@ export const isLateCheckIn = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_P
 };
 
 /**
- * Seconds late relative to the configured penalty start time (default 09:00 AM), in company timezone.
+ * Seconds late relative to the configured penalty start time (default 09:15 AM), in company timezone.
  */
 export const calculateLatenessSeconds = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME, timeZone = 'Asia/Kolkata') => {
   if (!checkInTime) return 0;

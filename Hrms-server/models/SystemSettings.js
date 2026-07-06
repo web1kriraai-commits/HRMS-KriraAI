@@ -27,10 +27,10 @@ const systemSettingsSchema = new mongoose.Schema({
     of: String,
     default: () => new Map()
   },
-  /** Late check-in penalty applies after this time (HH:mm, 24h) — e.g. 09:00 */
+  /** Late check-in penalty applies after this time (HH:mm, 24h) — e.g. 09:15 */
   latePenaltyStartTime: {
     type: String,
-    default: '09:00'
+    default: '09:15'
   }
 }, {
   timestamps: true

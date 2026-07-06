@@ -78,12 +78,12 @@ export const clockIn = async (req, res) => {
 
     const isHoliday = await checkIsHoliday(today);
     const settings = await SystemSettings.getSettings();
-    const latePenaltyStartTime = resolveLatePenaltyStartTime(settings);
+    const tz = settings?.timezone || 'Asia/Kolkata';
+    const dateInTz = getDateStrInTimezone(now, tz);
+    const latePenaltyStartTime = resolveLatePenaltyStartTime(settings, dateInTz);
 
     // Check-in from configured time (default 08:30, company timezone). Admins exempt.
     if (req.user.role !== 'Admin') {
-      const tz = settings?.timezone || 'Asia/Kolkata';
-      const dateInTz = getDateStrInTimezone(now, tz);
       const { hour: checkInHour, minute: checkInMinute } = resolveCheckInTimeForDate(settings, dateInTz);
       if (!isClockInTimeAllowed(now, tz, isHoliday, checkInHour, checkInMinute)) {
         return res.status(403).json({
@@ -102,7 +102,7 @@ export const clockIn = async (req, res) => {
     // If a record already exists (e.g. created by admin as a waiver), use its isPenaltyDisabled flag
     const isPenaltyDisabled = existing ? !!existing.isPenaltyDisabled : false;
 
-    const { lateCheckIn, penaltySeconds } = getFlags(0, !!hasHalfDay, 0, isHoliday, now, isPenaltyDisabled, 0, null, false, latePenaltyStartTime, settings?.timezone || 'Asia/Kolkata');
+    const { lateCheckIn, penaltySeconds } = getFlags(0, !!hasHalfDay, 0, isHoliday, now, isPenaltyDisabled, 0, dateInTz, false, latePenaltyStartTime, tz);
 
     let attendance;
     if (existing) {
@@ -264,7 +264,7 @@ export const clockOut = async (req, res) => {
       0,
       today,
       isEarlyReleaseDay,
-      resolveLatePenaltyStartTime(settings), settings?.timezone || 'Asia/Kolkata'
+      resolveLatePenaltyStartTime(settings, today), settings?.timezone || 'Asia/Kolkata'
     );
     applyFlagsToAttendance(attendance, flags, worked, {
       isHalfDayApproved: !!hasHalfDay,
@@ -449,7 +449,7 @@ export const getAttendanceHistory = async (req, res) => {
           0,
           record.date,
           hasCheckoutOverrideForDate(settings, record.date),
-          resolveLatePenaltyStartTime(settings), settings?.timezone || 'Asia/Kolkata'
+          resolveLatePenaltyStartTime(settings, record.date), settings?.timezone || 'Asia/Kolkata'
         );
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
@@ -612,7 +612,7 @@ export const adminCreateAttendance = async (req, res) => {
           0,
           attendance.date,
           hasCheckoutOverrideForDate(settings, attendance.date),
-          resolveLatePenaltyStartTime(settings), settings?.timezone || 'Asia/Kolkata'
+          resolveLatePenaltyStartTime(settings, attendance.date), settings?.timezone || 'Asia/Kolkata'
         );
         // Store penalty-adjusted worked time so displayed hours already reflect the deduction
         attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
@@ -769,7 +769,7 @@ export const adminCreateAttendance = async (req, res) => {
         0,
         date,
         hasCheckoutOverrideForDate(settingsForFlags, date),
-        resolveLatePenaltyStartTime(settingsForFlags), settingsForFlags?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(settingsForFlags, date), settingsForFlags?.timezone || 'Asia/Kolkata'
       );
       // Store penalty-adjusted worked time so displayed hours already reflect the deduction
       attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
@@ -946,7 +946,7 @@ export const adminUpdateAttendance = async (req, res) => {
         0,
         attendance.date,
         hasCheckoutOverrideForDate(settingsForFlags, attendance.date),
-        resolveLatePenaltyStartTime(settingsForFlags), settingsForFlags?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(settingsForFlags, attendance.date), settingsForFlags?.timezone || 'Asia/Kolkata'
       );
       applyFlagsToAttendance(attendance, flags, worked);
     } else if (attendance.checkIn && attendance.checkOut) {
@@ -1078,7 +1078,7 @@ export const getAllAttendance = async (req, res) => {
         0,
         record.date,
         isEarlyReleaseDay,
-        resolveLatePenaltyStartTime(systemSettings), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, record.date), systemSettings?.timezone || 'Asia/Kolkata'
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1171,7 +1171,7 @@ export const getTodayAllAttendance = async (req, res) => {
         0,
         today,
         isEarlyReleaseToday,
-        resolveLatePenaltyStartTime(systemSettings), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, today), systemSettings?.timezone || 'Asia/Kolkata'
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1370,7 +1370,7 @@ export const recalculateHalfDayFlags = async (req, res) => {
         0,
         record.date,
         hasCheckoutOverrideForDate(systemSettings, record.date),
-        resolveLatePenaltyStartTime(systemSettings), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, record.date), systemSettings?.timezone || 'Asia/Kolkata'
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1470,7 +1470,7 @@ export const addManualHours = async (req, res) => {
       0,
       date,
       hasCheckoutOverrideForDate(settingsForFlags, date),
-      resolveLatePenaltyStartTime(settingsForFlags), settingsForFlags?.timezone || 'Asia/Kolkata'
+      resolveLatePenaltyStartTime(settingsForFlags, date), settingsForFlags?.timezone || 'Asia/Kolkata'
     );
     applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1530,7 +1530,7 @@ export const adminAddManualHours = async (req, res) => {
       0,
       date,
       hasCheckoutOverrideForDate(settingsForFlags, date),
-      resolveLatePenaltyStartTime(settingsForFlags), settingsForFlags?.timezone || 'Asia/Kolkata'
+      resolveLatePenaltyStartTime(settingsForFlags, date), settingsForFlags?.timezone || 'Asia/Kolkata'
     );
     applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1605,7 +1605,7 @@ export const adminBulkAddManualHours = async (req, res) => {
         0,
         date,
         hasCheckoutOverrideForDate(systemSettings, date),
-        resolveLatePenaltyStartTime(systemSettings), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, date), systemSettings?.timezone || 'Asia/Kolkata'
       );
       applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1709,7 +1709,7 @@ export const reviewEarlyCheckout = async (req, res) => {
         0,
         attendance.date,
         hasCheckoutOverrideForDate(settings, attendance.date),
-        resolveLatePenaltyStartTime(settings), settings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(settings, attendance.date), settings?.timezone || 'Asia/Kolkata'
       );
       applyFlagsToAttendance(attendance, flags, worked, {
         isHalfDayApproved: !!hasHalfDay,
@@ -2130,7 +2130,7 @@ export const recalculateAttendanceFlagsForDate = async (dateStr) => {
       0,
       dateStr,
       isEarlyReleaseDay,
-      resolveLatePenaltyStartTime(settings), settings?.timezone || 'Asia/Kolkata'
+      resolveLatePenaltyStartTime(settings, dateStr), settings?.timezone || 'Asia/Kolkata'
     );
     applyFlagsToAttendance(record, flags, worked);
     await record.save();
