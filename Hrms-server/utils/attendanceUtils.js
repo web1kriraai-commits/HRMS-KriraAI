@@ -1,10 +1,11 @@
 // Business Rules
 // Normal time: 8 hours 15 minutes to 8 hours 22 minutes (495 to 502 minutes)
 // Low Time: worked < 8:15 (< 495 minutes)
-// Extra Time: worked > 8:22 (> 502 minutes)
-// Half-day: normal = 4h 15m (255 min) to 4h 22m (262 min). Low < 4h 15m, Extra > 4h 22m
-// Holiday Work: ALL worked time counts as overtime (extraTime), no lowTime ever
-// Late Check-in Penalty: if checkIn > 09:00 AM, deduct from effective worked time (skipped when half-day leave approved that day)
+// General Overtime: worked > 8:15 (> 495 minutes) — auto-calculated daily
+// Management Overtime: employee request + admin approval
+// Early Overtime: deficit from approved early checkout; must be covered before/after
+// Half-day: normal = 4h 15m (255 min) to 4h 22m (262 min). Low < 4h 15m, General OT > 4h 15m
+// Holiday Work: ALL worked time counts as general overtime (extraTime), no lowTime ever
 
 const MIN_NORMAL_MINUTES = 495; // 8h 15m (lower bound for normal)
 const MAX_NORMAL_MINUTES = 502; // 8h 22m (upper bound for normal)
@@ -124,12 +125,14 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
 export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0, dateStr = null, isEarlyReleaseDay = false) => {
   // Holiday rule: if employee works on a holiday, entire duration is overtime, no penalty
   if (isHolidayWork) {
+    const holidayMins = Math.floor(workedSeconds / 60);
     return {
       lowTime: false,
       extraTime: workedSeconds > 0,
       lateCheckIn: false,
       penaltySeconds: 0,
-      completedOvertime: Math.floor(workedSeconds / 60),
+      completedOvertime: holidayMins,
+      completedGeneralOvertime: holidayMins,
       unfulfilledOvertime: 0
     };
   }
@@ -164,44 +167,227 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
   const standardMinNormal = isHalfDayApproved ? (MIN_NORMAL_MINUTES / 2) : MIN_NORMAL_MINUTES;
   const standardMaxNormal = isHalfDayApproved ? (MAX_NORMAL_MINUTES / 2) : MAX_NORMAL_MINUTES;
 
-  // Auto overtime: minutes worked beyond normal cap (8h 15m + 7m buffer = 8h 22m full day)
-  const completedOvertime =
-    workedMinutes > standardMaxNormal ? Math.floor(workedMinutes - standardMaxNormal) : 0;
+  // Auto general overtime: minutes worked beyond 8h 15m (full day) or 4h 15m (half-day)
+  const completedGeneralOvertime =
+    workedMinutes > standardMinNormal ? Math.floor(workedMinutes - standardMinNormal) : 0;
   const unfulfilledOvertime = 0;
 
   return {
     lowTime: isEarlyReleaseDay ? false : workedMinutes > 0 && workedMinutes < standardMinNormal,
-    extraTime: completedOvertime > 0,
+    extraTime: completedGeneralOvertime > 0,
     lateCheckIn: late,
     penaltySeconds,
-    completedOvertime,
+    completedOvertime: completedGeneralOvertime,
+    completedGeneralOvertime,
     unfulfilledOvertime
   };
 };
 
-/** Persist auto-calculated overtime on the attendance record (no manual request/approval). */
-export const syncAutoOvertimeRecord = (attendance, flags) => {
-  const mins = flags.completedOvertime || 0;
-  if (mins > 0 && flags.extraTime) {
-    attendance.overtimeRequest = {
-      reason: 'Automatic (worked beyond 8h 15m + 7m buffer)',
-      durationMinutes: mins,
-      status: 'Approved',
-      requestedAt: attendance.overtimeRequest?.requestedAt || new Date(),
-      approvedAt: new Date(),
-      completedMinutes: mins,
-      unfulfilledMinutes: 0
-    };
+/**
+ * Calculate early checkout deficit minutes (time short of minimum shift).
+ */
+export const calculateEarlyOvertimeDeficit = (
+  workedMinutes,
+  isHalfDayApproved,
+  earlyLogoutApproved
+) => {
+  if (!earlyLogoutApproved) return 0;
+  const minNormal = isHalfDayApproved ? MIN_NORMAL_MINUTES / 2 : MIN_NORMAL_MINUTES;
+  if (workedMinutes >= minNormal) return 0;
+  return Math.floor(minNormal - workedMinutes);
+};
+
+/** Update early overtime status based on deficit vs covered. */
+export const syncEarlyOvertimeStatus = (attendance) => {
+  if (!attendance.earlyOvertime) {
+    attendance.earlyOvertime = { deficitMinutes: 0, coveredMinutes: 0, status: 'None' };
+  }
+  const { deficitMinutes = 0, coveredMinutes = 0 } = attendance.earlyOvertime;
+  if (deficitMinutes <= 0) {
+    attendance.earlyOvertime.status = 'None';
+  } else if (coveredMinutes >= deficitMinutes) {
+    attendance.earlyOvertime.status = 'Covered';
+  } else if (coveredMinutes > 0) {
+    attendance.earlyOvertime.status = 'Partial';
   } else {
-    attendance.overtimeRequest = {
+    attendance.earlyOvertime.status = 'Pending';
+  }
+  return attendance;
+};
+
+/**
+ * Allocate surplus minutes to cover earliest outstanding early-overtime deficits.
+ * Returns minutes remaining after allocation.
+ */
+export const allocateEarlyOvertimeCoverage = (records, surplusMinutes) => {
+  let remaining = surplusMinutes;
+  if (remaining <= 0) return 0;
+
+  const sorted = [...records]
+    .filter((r) => {
+      const eo = r.earlyOvertime || {};
+      const deficit = eo.deficitMinutes || 0;
+      const covered = eo.coveredMinutes || 0;
+      return deficit > covered;
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  for (const record of sorted) {
+    if (remaining <= 0) break;
+    if (!record.earlyOvertime) {
+      record.earlyOvertime = { deficitMinutes: 0, coveredMinutes: 0, status: 'None' };
+    }
+    const uncovered = record.earlyOvertime.deficitMinutes - record.earlyOvertime.coveredMinutes;
+    const toCover = Math.min(remaining, uncovered);
+    record.earlyOvertime.coveredMinutes += toCover;
+    remaining -= toCover;
+    syncEarlyOvertimeStatus(record);
+  }
+
+  return remaining;
+};
+
+/** Read general OT from legacy overtimeRequest without losing historical values. */
+export const getLegacyGeneralOvertimeMinutes = (attendance) => {
+  const stored = attendance?.generalOvertimeMinutes;
+  if (typeof stored === 'number' && stored > 0) return stored;
+
+  const ot = attendance?.overtimeRequest;
+  if (!ot) return 0;
+  if (typeof ot.completedMinutes === 'number' && ot.completedMinutes > 0) return ot.completedMinutes;
+  if (ot.status === 'Approved' && typeof ot.durationMinutes === 'number' && ot.durationMinutes > 0) {
+    return ot.durationMinutes;
+  }
+  return 0;
+};
+
+/**
+ * Resolve general OT minutes — never lower than previously stored legacy values.
+ * Preserves existing overtimeRequest / generalOvertimeMinutes when recalc yields zero.
+ */
+export const resolveGeneralOvertimeMinutes = (attendance, calculatedMins = 0) => {
+  const legacyMins = getLegacyGeneralOvertimeMinutes(attendance);
+  return Math.max(calculatedMins || 0, legacyMins);
+};
+
+/**
+ * Hydrate response objects so old records expose new OT fields without DB migration.
+ * Does not remove or overwrite any existing field values.
+ */
+export const hydrateAttendanceOvertimeFields = (attendance) => {
+  if (!attendance) return attendance;
+
+  const doc = attendance.toObject ? attendance.toObject() : { ...attendance };
+  const legacyGeneral = getLegacyGeneralOvertimeMinutes(doc);
+
+  if (!doc.generalOvertimeMinutes || doc.generalOvertimeMinutes <= 0) {
+    if (legacyGeneral > 0) doc.generalOvertimeMinutes = legacyGeneral;
+  }
+
+  if (!doc.managementOvertime) {
+    doc.managementOvertime = {
       reason: '',
       durationMinutes: 0,
       status: 'None',
-      completedMinutes: 0,
-      unfulfilledMinutes: 0
+      completedMinutes: 0
     };
   }
+
+  if (!doc.earlyOvertime) {
+    doc.earlyOvertime = {
+      reason: '',
+      durationMinutes: 0,
+      requestStatus: 'None',
+      deficitMinutes: 0,
+      coveredMinutes: 0,
+      status: 'None'
+    };
+  } else if (!doc.earlyOvertime.requestStatus) {
+    doc.earlyOvertime.requestStatus =
+      doc.earlyLogoutRequest === 'Pending'
+        ? 'Pending'
+        : doc.earlyLogoutRequest === 'Approved'
+          ? 'Approved'
+          : doc.earlyLogoutRequest === 'Rejected'
+            ? 'Rejected'
+            : 'None';
+  }
+
+  // Keep legacy overtimeRequest intact; only ensure extraTimeFlag reflects all sources
+  const hasGeneral =
+    (doc.generalOvertimeMinutes || 0) > 0 ||
+    (doc.overtimeRequest?.status === 'Approved' && (doc.overtimeRequest?.completedMinutes || 0) > 0);
+  const hasMgmt =
+    doc.managementOvertime?.status === 'Approved' &&
+    (doc.managementOvertime?.completedMinutes || 0) > 0;
+
+  if (hasGeneral || hasMgmt) {
+    doc.extraTimeFlag = true;
+  }
+
+  return doc;
+};
+
+/** Persist all three overtime types on the attendance record (non-destructive). */
+export const syncAllOvertimeRecords = (attendance, flags, context = {}) => {
+  const {
+    isHalfDayApproved = false,
+    earlyLogoutApproved = false,
+    workedMinutes = 0
+  } = context;
+
+  const calculatedMins = flags.completedGeneralOvertime ?? flags.completedOvertime ?? 0;
+  const generalMins = resolveGeneralOvertimeMinutes(attendance, calculatedMins);
+  attendance.generalOvertimeMinutes = generalMins;
+
+  // Mirror to legacy overtimeRequest only when new OT is calculated — never clear existing legacy data
+  if (calculatedMins > 0 && flags.extraTime) {
+    const prev = attendance.overtimeRequest || {};
+    attendance.overtimeRequest = {
+      reason: prev.reason || 'Automatic (worked beyond 8h 15m)',
+      durationMinutes: generalMins,
+      status: 'Approved',
+      requestedAt: prev.requestedAt || new Date(),
+      approvedBy: prev.approvedBy,
+      approvedAt: prev.approvedAt || new Date(),
+      completedMinutes: generalMins,
+      unfulfilledMinutes: prev.unfulfilledMinutes || 0
+    };
+  }
+  // Intentionally do NOT reset overtimeRequest when calculatedMins is 0 — preserves all historical records
+
+  // Early overtime deficit — only set when not already recorded; never reset coveredMinutes
+  if (earlyLogoutApproved && attendance.checkOut) {
+    if (!attendance.earlyOvertime) {
+      attendance.earlyOvertime = { deficitMinutes: 0, coveredMinutes: 0, status: 'None' };
+    }
+    const existingDeficit = attendance.earlyOvertime.deficitMinutes || 0;
+    if (existingDeficit <= 0) {
+      const deficit = calculateEarlyOvertimeDeficit(
+        workedMinutes,
+        isHalfDayApproved,
+        earlyLogoutApproved
+      );
+      if (deficit > 0) {
+        attendance.earlyOvertime.deficitMinutes = deficit;
+      }
+    }
+    syncEarlyOvertimeStatus(attendance);
+  }
+
+  const legacyGeneral = getLegacyGeneralOvertimeMinutes(attendance);
+  attendance.extraTimeFlag =
+    generalMins > 0 ||
+    legacyGeneral > 0 ||
+    (attendance.managementOvertime?.status === 'Approved' &&
+      (attendance.managementOvertime?.completedMinutes || 0) > 0);
+
   return attendance;
+};
+
+/** @deprecated Use syncAllOvertimeRecords */
+export const syncAutoOvertimeRecord = (attendance, flags, context = {}) => {
+  return syncAllOvertimeRecords(attendance, flags, context);
 };
 
 export const getTodayStr = () => {

@@ -113,6 +113,43 @@ const attendanceSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  /** Auto-calculated daily OT above 8h 15m */
+  generalOvertimeMinutes: { type: Number, default: 0 },
+  /** Admin-approved management OT (employee request) */
+  managementOvertime: {
+    reason: { type: String, trim: true },
+    durationMinutes: { type: Number, default: 0 },
+    status: {
+      type: String,
+      enum: ['None', 'Pending', 'Approved', 'Rejected'],
+      default: 'None'
+    },
+    requestedAt: { type: Date },
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    approvedAt: { type: Date },
+    completedMinutes: { type: Number, default: 0 }
+  },
+  /** Early checkout OT — request, deficit, and coverage tracking */
+  earlyOvertime: {
+    reason: { type: String, trim: true },
+    durationMinutes: { type: Number, default: 0 },
+    requestStatus: {
+      type: String,
+      enum: ['None', 'Pending', 'Approved', 'Rejected'],
+      default: 'None'
+    },
+    requestedAt: { type: Date },
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    approvedAt: { type: Date },
+    deficitMinutes: { type: Number, default: 0 },
+    coveredMinutes: { type: Number, default: 0 },
+    status: {
+      type: String,
+      enum: ['None', 'Pending', 'Partial', 'Covered'],
+      default: 'None'
+    }
+  },
+  /** @deprecated Legacy field — kept for backward compatibility */
   overtimeRequest: {
     reason: { type: String, trim: true },
     durationMinutes: { type: Number, default: 0 },

@@ -47,7 +47,7 @@ const formatDateToDDMMYYYY = (dateStr) => {
 
 export const createUser = async (req, res) => {
   try {
-    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, salaryBreakdown, paidLeaveAccess } = req.body;
+    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, bankName, bankAccountHolderName, bankAccountNumber, bankIfscCode, salaryBreakdown, paidLeaveAccess } = req.body;
     const currentUser = req.user;
 
     // Convert dates to dd-mm-yyyy format if provided
@@ -126,6 +126,31 @@ export const createUser = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
+    if (!mobileNumber || !String(mobileNumber).trim()) {
+      return res.status(400).json({ message: 'Mobile number is required' });
+    }
+    if (!aadhaarNumber || !String(aadhaarNumber).trim()) {
+      return res.status(400).json({ message: 'Aadhaar number is required' });
+    }
+    const normalizedAadhaarNumber = String(aadhaarNumber).replace(/\D/g, '');
+    if (!/^\d{12}$/.test(normalizedAadhaarNumber)) {
+      return res.status(400).json({ message: 'Aadhaar number must be exactly 12 digits' });
+    }
+    if (!bankName || !String(bankName).trim()) {
+      return res.status(400).json({ message: 'Bank name is required' });
+    }
+    if (!bankAccountHolderName || !String(bankAccountHolderName).trim()) {
+      return res.status(400).json({ message: 'Employee full name (as per checkbook) is required' });
+    }
+    const normalizedAccountNumber = String(bankAccountNumber || '').replace(/\D/g, '');
+    if (!/^\d{9,18}$/.test(normalizedAccountNumber)) {
+      return res.status(400).json({ message: 'Account number must be 9 to 18 digits' });
+    }
+    const normalizedIfscCode = String(bankIfscCode || '').trim().toUpperCase();
+    if (normalizedIfscCode.length !== 11) {
+      return res.status(400).json({ message: 'IFSC code must be exactly 11 characters' });
+    }
+
     // Role-based authorization
     // Only Admin can create Admin, HR, or Employee
     // Admin and HR can create Employee
@@ -158,10 +183,14 @@ export const createUser = async (req, res) => {
       joiningDate: formattedJoiningDate,
       bonds: formattedBonds,
       salaryBreakdown: formattedSalaryBreakdown,
-      aadhaarNumber: aadhaarNumber || undefined,
+      aadhaarNumber: normalizedAadhaarNumber,
       guardianName: guardianName || undefined,
-      mobileNumber: mobileNumber || undefined,
+      mobileNumber: String(mobileNumber).trim(),
       guardianMobileNumber: guardianMobileNumber || undefined,
+      bankName: String(bankName).trim(),
+      bankAccountHolderName: String(bankAccountHolderName).trim(),
+      bankAccountNumber: normalizedAccountNumber,
+      bankIfscCode: normalizedIfscCode,
       paidLeaveAllocation: 0,
     });
 
@@ -342,7 +371,16 @@ export const updateUser = async (req, res) => {
 
     // Update aadhaar number if provided
     if (aadhaarNumber !== undefined) {
-      user.aadhaarNumber = aadhaarNumber.trim() || undefined;
+      const trimmedAadhaar = String(aadhaarNumber).trim();
+      if (trimmedAadhaar) {
+        const normalizedAadhaar = trimmedAadhaar.replace(/\D/g, '');
+        if (!/^\d{12}$/.test(normalizedAadhaar)) {
+          return res.status(400).json({ message: 'Aadhaar number must be exactly 12 digits' });
+        }
+        user.aadhaarNumber = normalizedAadhaar;
+      } else {
+        user.aadhaarNumber = undefined;
+      }
     }
 
     // Update guardian name if provided
