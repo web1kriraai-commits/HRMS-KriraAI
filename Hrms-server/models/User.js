@@ -54,6 +54,23 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  bankName: {
+    type: String,
+    trim: true
+  },
+  bankAccountHolderName: {
+    type: String,
+    trim: true
+  },
+  bankAccountNumber: {
+    type: String,
+    trim: true
+  },
+  bankIfscCode: {
+    type: String,
+    trim: true,
+    uppercase: true
+  },
   isActive: {
     type: Boolean,
     default: true

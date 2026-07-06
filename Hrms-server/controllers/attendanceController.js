@@ -3,8 +3,35 @@ import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
 import SystemSettings from '../models/SystemSettings.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
+
+/** Ensure API responses include new OT fields without stripping legacy data. */
+const toAttendanceResponse = (record) => {
+  if (!record) return record;
+  return hydrateAttendanceOvertimeFields(record);
+};
+
+const toAttendanceListResponse = (records) =>
+  (records || []).map((r) => toAttendanceResponse(r));
+
+const applyFlagsToAttendance = (attendance, flags, worked, context = {}) => {
+  attendance.totalWorkedSeconds = Math.max(0, worked - (flags.penaltySeconds || 0));
+  attendance.lowTimeFlag = flags.lowTime;
+  attendance.extraTimeFlag = flags.extraTime;
+  attendance.penaltySeconds = flags.penaltySeconds || 0;
+  attendance.lateCheckIn = flags.lateCheckIn || false;
+  const mergedContext = {
+    isHalfDayApproved: context.isHalfDayApproved ?? false,
+    earlyLogoutApproved: context.earlyLogoutApproved ?? (attendance.earlyLogoutRequest === 'Approved'),
+    extraTimeLeaveMinutes: context.extraTimeLeaveMinutes ?? 0,
+    workedMinutes:
+      Math.floor(Math.max(0, worked - (flags.penaltySeconds || 0)) / 60) +
+      (context.extraTimeLeaveMinutes ?? 0)
+  };
+  syncAllOvertimeRecords(attendance, flags, mergedContext);
+  return flags;
+};
 
 // Forced reload to clear potential nodemon cache issues.
 
@@ -29,12 +56,16 @@ export const clockIn = async (req, res) => {
 
     const isHoliday = await checkIsHoliday(today);
 
-    // Check-in only from 8:30 AM onward (company timezone). Admins exempt.
+    // Check-in from configured time (default 08:30, company timezone). Admins exempt.
     if (req.user.role !== 'Admin') {
       const settings = await SystemSettings.getSettings();
       const tz = settings?.timezone || 'Asia/Kolkata';
-      if (!isClockInTimeAllowed(now, tz, isHoliday)) {
-        return res.status(403).json({ message: 'Check-in is only allowed from 8:30 AM (company time)' });
+      const dateInTz = getDateStrInTimezone(now, tz);
+      const { hour: checkInHour, minute: checkInMinute } = resolveCheckInTimeForDate(settings, dateInTz);
+      if (!isClockInTimeAllowed(now, tz, isHoliday, checkInHour, checkInMinute)) {
+        return res.status(403).json({
+          message: `Check-in is only allowed from ${formatCheckoutTimeLabel(checkInHour, checkInMinute)} (company time)`
+        });
       }
     }
 
@@ -79,7 +110,7 @@ export const clockIn = async (req, res) => {
 
     await logAction(req.user._id, req.user.name, 'CLOCK_IN', 'ATTENDANCE', attendance._id.toString(), `Clocked in at ${today}${isPenaltyDisabled ? ' (Penalty Exempted)' : ''}`);
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Clock in error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -117,22 +148,44 @@ export const clockOut = async (req, res) => {
 
     const isHoliday = await checkIsHoliday(today);
 
+    const settings = await SystemSettings.getSettings();
+    const tz = settings?.timezone || 'Asia/Kolkata';
+    const dateInTz = getDateStrInTimezone(now, tz);
+    const { hour: checkoutHour, minute: checkoutMinute } = resolveCheckoutTimeForDate(settings, dateInTz);
+
     if (!isClockOutTimeAllowed(now, {
       hasHalfDayLeave: !!hasHalfDay,
       earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
       roleIsAdmin: req.user.role === 'Admin',
-      isHoliday: isHoliday
+      isHoliday: isHoliday,
+      checkoutHour,
+      checkoutMinute,
+      timeZone: tz
     })) {
-      return res.status(403).json({ message: 'Check-out is only allowed after 5:30 PM' });
+      const label = formatCheckoutTimeLabel(checkoutHour, checkoutMinute);
+      return res.status(403).json({
+        message: `Check-out is only allowed after ${label} (company time)`,
+        checkoutTime: `${String(checkoutHour).padStart(2, '0')}:${String(checkoutMinute).padStart(2, '0')}`
+      });
     }
 
     const workedSecondsBeforeClockout = calculateWorkedSeconds(attendance, now.toISOString());
+    const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, dateInTz);
 
-    if (!isWorkedSecondsSufficientForCheckout(workedSecondsBeforeClockout, {
-      hasHalfDayLeave: !!hasHalfDay,
-      earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
-      isHoliday: isHoliday
-    })) {
+    const breakRequirementMet =
+      hasMinimumTotalBreakTime(attendance.breaks) ||
+      attendance.isCompulsoryBreakDisabled ||
+      attendance.earlyLogoutRequest === 'Approved' ||
+      isEarlyReleaseDay;
+
+    if (
+      !isWorkedSecondsSufficientForCheckout(workedSecondsBeforeClockout, {
+        hasHalfDayLeave: !!hasHalfDay,
+        earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
+        isHoliday: isHoliday
+      }) &&
+      !isEarlyReleaseDay
+    ) {
       const msg = hasHalfDay
         ? `Shift not completed (half-day minimum ${Math.round(HALF_DAY_MIN_SHIFT_SECONDS / 60)} minutes required). Complete your worked time or request an early checkout from an admin.`
         : 'Shift not completed (8h 15m required). Please complete your shift or request an early checkout from an admin.';
@@ -142,17 +195,14 @@ export const clockOut = async (req, res) => {
       });
     }
 
-    // MANDATORY 20-minute break check
-    const standardBreaks = attendance.breaks.filter(b => b.type === 'Standard' && b.end);
-    const hasCompletedFullBreak = standardBreaks.some(b => {
-      const duration = Math.floor((new Date(b.end).getTime() - new Date(b.start).getTime()) / 1000);
-      return duration >= 1200; // 20 minutes
-    });
-
+    // At checkout: Break + Extra Break combined must total at least 20 minutes (unless admin approved / early release day)
     const isBreakPolicyActive = today >= COMPULSORY_BREAK_EFFECTIVE_DATE;
-    if (!hasCompletedFullBreak && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay && !isHoliday) {
-      return res.status(403).json({ 
-        message: 'Mandatory Break Policy: You must complete at least one 20-minute standard break before checking out.'
+
+    if (!breakRequirementMet && isBreakPolicyActive && !hasHalfDay && !isHoliday) {
+      return res.status(403).json({
+        message:
+          'You need at least 20 minutes of break time (Break + Extra Break combined) before checkout. Request admin approval if you could not take enough break.',
+        requiresRequest: true
       });
     }
 
@@ -181,30 +231,47 @@ export const clockOut = async (req, res) => {
       extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
     }
 
-    const approvedOvertimeMinutes = (attendance.overtimeRequest && attendance.overtimeRequest.status === 'Approved') ? attendance.overtimeRequest.durationMinutes : 0;
-    const { lowTime, extraTime, lateCheckIn, penaltySeconds, completedOvertime, unfulfilledOvertime } = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn, attendance.isPenaltyDisabled, approvedOvertimeMinutes, today);
+    const flags = getFlags(
+      worked,
+      !!hasHalfDay,
+      extraTimeLeaveMinutes,
+      isHolidayWork,
+      attendance.checkIn,
+      attendance.isPenaltyDisabled,
+      0,
+      today,
+      isEarlyReleaseDay
+    );
+    applyFlagsToAttendance(attendance, flags, worked, {
+      isHalfDayApproved: !!hasHalfDay,
+      earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
+      extraTimeLeaveMinutes
+    });
 
-    // Store penalty-adjusted worked time so displayed hours already reflect the deduction
-    attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
-    attendance.lowTimeFlag = lowTime;
-    attendance.extraTimeFlag = extraTime;
-    attendance.penaltySeconds = penaltySeconds;
-
-    if (attendance.overtimeRequest) {
-      attendance.overtimeRequest.completedMinutes = completedOvertime || 0;
-      attendance.overtimeRequest.unfulfilledMinutes = unfulfilledOvertime || 0;
+    // Use general OT surplus to cover outstanding early-checkout deficits (oldest first)
+    const generalMins = attendance.generalOvertimeMinutes || 0;
+    if (generalMins > 0) {
+      const deficitRecords = await Attendance.find({
+        userId,
+        'earlyOvertime.deficitMinutes': { $gt: 0 },
+        _id: { $ne: attendance._id }
+      }).sort({ date: 1 });
+      if (deficitRecords.length > 0) {
+        allocateEarlyOvertimeCoverage(deficitRecords, generalMins);
+        await Promise.all(deficitRecords.map((r) => r.save()));
+      }
     }
 
     await attendance.save();
 
     let logMessage = `Clocked out at ${today}`;
-    if (lateCheckIn && penaltySeconds > 0) {
-      logMessage += ` (Late Check-in Penalty: ${Math.round(penaltySeconds / 60)} minutes)`;
+    if (flags.lateCheckIn && flags.penaltySeconds > 0) {
+      logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
     }
 
     await logAction(req.user._id, req.user.name, 'CLOCK_OUT', 'ATTENDANCE', attendance._id.toString(), logMessage);
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Clock out error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -254,7 +321,7 @@ export const startBreak = async (req, res) => {
     attendance.breaks.push(breakData);
 
     await attendance.save();
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Start break error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -279,30 +346,11 @@ export const endBreak = async (req, res) => {
     const now = new Date();
     const durationSeconds = Math.max(0, (now.getTime() - activeBreak.start.getTime()) / 1000);
 
-    const hasHalfDay = await LeaveRequest.findOne({
-      userId,
-      startDate: attendance.date,
-      category: 'Half Day Leave',
-      status: 'Approved'
-    });
-
-    // ENFORCE 20 MINUTE BREAK (1200 seconds) - Only from April 6th; not on approved half-day leave days
-    const isHoliday = await checkIsHoliday(attendance.date);
-    const isBreakPolicyActive = attendance.date >= COMPULSORY_BREAK_EFFECTIVE_DATE;
-    if (durationSeconds < 1200 && !attendance.isCompulsoryBreakDisabled && isBreakPolicyActive && !hasHalfDay && !isHoliday) {
-      const remainingSeconds = Math.ceil(1200 - durationSeconds);
-      const remainingMinutes = Math.ceil(remainingSeconds / 60);
-      return res.status(400).json({ 
-        message: `Mandatory break policy: You must take at least 20 minutes of break. Please wait ${remainingMinutes} more minute(s).`,
-        remainingSeconds 
-      });
-    }
-
     activeBreak.end = now;
     activeBreak.durationSeconds = durationSeconds;
 
     await attendance.save();
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('End break error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -328,7 +376,7 @@ export const cancelBreak = async (req, res) => {
     attendance.breaks.splice(activeBreakIndex, 1);
 
     await attendance.save();
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Cancel break error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -341,7 +389,7 @@ export const getTodayAttendance = async (req, res) => {
     const today = getTodayStr();
 
     const attendance = await Attendance.findOne({ userId, date: today });
-    res.json(attendance || null);
+    res.json(attendance ? toAttendanceResponse(attendance) : null);
   } catch (error) {
     console.error('Get today attendance error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -377,18 +425,28 @@ export const getAttendanceHistory = async (req, res) => {
           status: 'Approved'
         });
 
-        const approvedOvertimeMinutes = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-        const flags = getFlags(worked, !!hasHalfDay, 0, false, record.checkIn, record.isPenaltyDisabled, approvedOvertimeMinutes);
+        const settings = await SystemSettings.getSettings();
+        const flags = getFlags(
+          worked,
+          !!hasHalfDay,
+          0,
+          false,
+          record.checkIn,
+          record.isPenaltyDisabled,
+          0,
+          record.date,
+          hasCheckoutOverrideForDate(settings, record.date)
+        );
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
         record.lateCheckIn = flags.lateCheckIn;
         record.penaltySeconds = flags.penaltySeconds;
         record.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
 
-        if (record.overtimeRequest) {
-          record.overtimeRequest.completedMinutes = flags.completedOvertime || 0;
-          record.overtimeRequest.unfulfilledMinutes = flags.unfulfilledOvertime || 0;
-        }
+        applyFlagsToAttendance(record, flags, worked, {
+          isHalfDayApproved: !!hasHalfDay,
+          earlyLogoutApproved: record.earlyLogoutRequest === 'Approved'
+        });
         await record.save();
       }
     }
@@ -404,7 +462,7 @@ export const getAttendanceHistory = async (req, res) => {
       }
     }
 
-    res.json(attendance);
+    res.json(toAttendanceListResponse(attendance));
   } catch (error) {
     console.error('Get attendance history error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -529,8 +587,18 @@ export const adminCreateAttendance = async (req, res) => {
           extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
         }
 
-        const approvedOT = (attendance.overtimeRequest && attendance.overtimeRequest.status === 'Approved') ? attendance.overtimeRequest.durationMinutes : 0;
-        flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn, !!isPenaltyDisabled || !!attendance.isPenaltyDisabled, approvedOT);
+        const settings = await SystemSettings.getSettings();
+        flags = getFlags(
+          worked,
+          !!hasHalfDay,
+          extraTimeLeaveMinutes,
+          isHolidayWork,
+          attendance.checkIn,
+          !!isPenaltyDisabled || !!attendance.isPenaltyDisabled,
+          0,
+          attendance.date,
+          hasCheckoutOverrideForDate(settings, attendance.date)
+        );
         // Store penalty-adjusted worked time so displayed hours already reflect the deduction
         attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
         attendance.lowTimeFlag = flags.lowTime;
@@ -557,7 +625,7 @@ export const adminCreateAttendance = async (req, res) => {
         afterData
       );
 
-      return res.json(attendance);
+      return res.json(toAttendanceResponse(attendance));
     }
 
     // Create new record
@@ -675,8 +743,18 @@ export const adminCreateAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
       }
 
-      const approvedOT = (attendance.overtimeRequest && attendance.overtimeRequest.status === 'Approved') ? attendance.overtimeRequest.durationMinutes : 0;
-      flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, checkInDate, !!isPenaltyDisabled, approvedOT);
+      const settingsForFlags = await SystemSettings.getSettings();
+      flags = getFlags(
+        worked,
+        !!hasHalfDay,
+        extraTimeLeaveMinutes,
+        isHolidayWork,
+        checkInDate,
+        !!isPenaltyDisabled,
+        0,
+        date,
+        hasCheckoutOverrideForDate(settingsForFlags, date)
+      );
       // Store penalty-adjusted worked time so displayed hours already reflect the deduction
       attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
       attendance.lowTimeFlag = flags.lowTime;
@@ -841,18 +919,19 @@ export const adminUpdateAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
       }
 
-      const approvedOT = (attendance.overtimeRequest && attendance.overtimeRequest.status === 'Approved') ? attendance.overtimeRequest.durationMinutes : 0;
-      const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, attendance.checkIn, attendance.isPenaltyDisabled, approvedOT);
-      // Store penalty-adjusted worked time so displayed hours already reflect the deduction
-      attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
-      attendance.lowTimeFlag = flags.lowTime;
-      attendance.extraTimeFlag = flags.extraTime;
-      attendance.penaltySeconds = flags.penaltySeconds;
-
-      if (attendance.overtimeRequest) {
-        attendance.overtimeRequest.completedMinutes = flags.completedOvertime || 0;
-        attendance.overtimeRequest.unfulfilledMinutes = flags.unfulfilledOvertime || 0;
-      }
+      const settingsForFlags = await SystemSettings.getSettings();
+      const flags = getFlags(
+        worked,
+        !!hasHalfDay,
+        extraTimeLeaveMinutes,
+        isHolidayWork,
+        attendance.checkIn,
+        attendance.isPenaltyDisabled,
+        0,
+        attendance.date,
+        hasCheckoutOverrideForDate(settingsForFlags, attendance.date)
+      );
+      applyFlagsToAttendance(attendance, flags, worked);
     } else if (attendance.checkIn && attendance.checkOut) {
       // Still update worked time even if flags are manual
       attendance.totalWorkedSeconds = calculateWorkedSeconds(attendance);
@@ -872,7 +951,7 @@ export const adminUpdateAttendance = async (req, res) => {
       afterData
     );
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Admin update attendance error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -928,6 +1007,7 @@ export const getAllAttendance = async (req, res) => {
     // Build a Set of all holiday date strings for O(1) lookup
     const allHolidays = await CompanyHoliday.find({}, 'date').lean();
     const holidayDateSet = new Set(allHolidays.map(h => h.date));
+    const systemSettings = await SystemSettings.getSettings();
 
     // Collect unique userIds and dates from records that need recalculation
     // Ensure r.userId exists to avoid TypeError if user was deleted
@@ -970,8 +1050,18 @@ export const getAllAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
       }
 
-      const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn, record.isPenaltyDisabled, approvedOT);
+      const isEarlyReleaseDay = hasCheckoutOverrideForDate(systemSettings, record.date);
+      const flags = getFlags(
+        worked,
+        hasHalfDay,
+        extraTimeLeaveMinutes,
+        isHolidayWork,
+        record.checkIn,
+        record.isPenaltyDisabled,
+        0,
+        record.date,
+        isEarlyReleaseDay
+      );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
       const changed = record.lowTimeFlag !== flags.lowTime ||
@@ -988,10 +1078,11 @@ export const getAllAttendance = async (req, res) => {
         record.penaltySeconds = flags.penaltySeconds;
         record.totalWorkedSeconds = adjustedWorked;
 
-        if (record.overtimeRequest) {
-          record.overtimeRequest.completedMinutes = flags.completedOvertime || 0;
-          record.overtimeRequest.unfulfilledMinutes = flags.unfulfilledOvertime || 0;
-        }
+        applyFlagsToAttendance(record, flags, worked, {
+          isHalfDayApproved: hasHalfDay,
+          earlyLogoutApproved: record.earlyLogoutRequest === 'Approved',
+          extraTimeLeaveMinutes
+        });
         recordsToSave.push(record.save());
       }
     }
@@ -1001,7 +1092,7 @@ export const getAllAttendance = async (req, res) => {
       await Promise.all(recordsToSave);
     }
 
-    res.json(attendance);
+    res.json(toAttendanceListResponse(attendance));
   } catch (error) {
     console.error('Get all attendance error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -1017,6 +1108,8 @@ export const getTodayAllAttendance = async (req, res) => {
 
     // --- OPTIMIZED: Bulk pre-fetch holidays and leaves ONCE before the loop ---
     const isHolidayWork = !!(await CompanyHoliday.findOne({ date: today }).lean());
+    const systemSettings = await SystemSettings.getSettings();
+    const isEarlyReleaseToday = hasCheckoutOverrideForDate(systemSettings, today);
 
     const recordsToProcess = attendance.filter(r => r.checkIn && r.checkOut && !r.isManualFlag);
     const userIds = recordsToProcess.map(r => r.userId?._id || r.userId);
@@ -1050,8 +1143,17 @@ export const getTodayAllAttendance = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
       }
 
-      const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-      const flags = getFlags(worked, hasHalfDay, extraTimeLeaveMinutes, isHolidayWork, record.checkIn, record.isPenaltyDisabled, approvedOT);
+      const flags = getFlags(
+        worked,
+        hasHalfDay,
+        extraTimeLeaveMinutes,
+        isHolidayWork,
+        record.checkIn,
+        record.isPenaltyDisabled,
+        0,
+        today,
+        isEarlyReleaseToday
+      );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
       const changed = record.lowTimeFlag !== flags.lowTime ||
@@ -1068,10 +1170,11 @@ export const getTodayAllAttendance = async (req, res) => {
         record.penaltySeconds = flags.penaltySeconds;
         record.totalWorkedSeconds = adjustedWorked;
 
-        if (record.overtimeRequest) {
-          record.overtimeRequest.completedMinutes = flags.completedOvertime || 0;
-          record.overtimeRequest.unfulfilledMinutes = flags.unfulfilledOvertime || 0;
-        }
+        applyFlagsToAttendance(record, flags, worked, {
+          isHalfDayApproved: hasHalfDay,
+          earlyLogoutApproved: record.earlyLogoutRequest === 'Approved',
+          extraTimeLeaveMinutes
+        });
         recordsToSave.push(record.save());
       }
     }
@@ -1080,7 +1183,7 @@ export const getTodayAllAttendance = async (req, res) => {
       await Promise.all(recordsToSave);
     }
 
-    res.json(attendance);
+    res.json(toAttendanceListResponse(attendance));
   } catch (error) {
     console.error('Get today all attendance error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -1211,6 +1314,7 @@ export const recalculateHalfDayFlags = async (req, res) => {
     // Bulk fetch holidays
     const allHolidays = await CompanyHoliday.find({ date: { $in: leaveDates } }, 'date').lean();
     const holidaySet = new Set(allHolidays.map(h => h.date));
+    const systemSettings = await SystemSettings.getSettings();
 
     let updatedCount = 0;
     const saves = [];
@@ -1237,8 +1341,17 @@ export const recalculateHalfDayFlags = async (req, res) => {
         extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
       }
 
-      const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-      const flags = getFlags(worked, true, extraTimeLeaveMinutes, isHolidayWork, record.checkIn, record.isPenaltyDisabled, approvedOT);
+      const flags = getFlags(
+        worked,
+        true,
+        extraTimeLeaveMinutes,
+        isHolidayWork,
+        record.checkIn,
+        record.isPenaltyDisabled,
+        0,
+        record.date,
+        hasCheckoutOverrideForDate(systemSettings, record.date)
+      );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
       const changed =
@@ -1255,10 +1368,11 @@ export const recalculateHalfDayFlags = async (req, res) => {
         record.penaltySeconds = flags.penaltySeconds;
         record.totalWorkedSeconds = adjustedWorked;
 
-        if (record.overtimeRequest) {
-          record.overtimeRequest.completedMinutes = flags.completedOvertime || 0;
-          record.overtimeRequest.unfulfilledMinutes = flags.unfulfilledOvertime || 0;
-        }
+        applyFlagsToAttendance(record, flags, worked, {
+          isHalfDayApproved: true,
+          earlyLogoutApproved: record.earlyLogoutRequest === 'Approved',
+          extraTimeLeaveMinutes
+        });
         saves.push(record.save());
         updatedCount++;
       }
@@ -1325,23 +1439,25 @@ export const addManualHours = async (req, res) => {
       status: 'Approved'
     });
 
-    const approvedOT = (attendance.overtimeRequest && attendance.overtimeRequest.status === 'Approved') ? attendance.overtimeRequest.durationMinutes : 0;
-    const { lowTime, extraTime, penaltySeconds, completedOvertime, unfulfilledOvertime } = getFlags(worked, !!hasHalfDay, 0, isHoliday, attendance.checkIn, attendance.isPenaltyDisabled, approvedOT);
-
-    attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
-    attendance.lowTimeFlag = lowTime;
-    attendance.extraTimeFlag = extraTime;
-
-    if (attendance.overtimeRequest) {
-      attendance.overtimeRequest.completedMinutes = completedOvertime || 0;
-      attendance.overtimeRequest.unfulfilledMinutes = unfulfilledOvertime || 0;
-    }
+    const settingsForFlags = await SystemSettings.getSettings();
+    const flags = getFlags(
+      worked,
+      !!hasHalfDay,
+      0,
+      isHoliday,
+      attendance.checkIn,
+      attendance.isPenaltyDisabled,
+      0,
+      date,
+      hasCheckoutOverrideForDate(settingsForFlags, date)
+    );
+    applyFlagsToAttendance(attendance, flags, worked);
 
     await attendance.save();
 
     await logAction(req.user._id, req.user.name, 'ADD_MANUAL_HOURS', 'ATTENDANCE', attendance._id.toString(), `Added ${hours} manual hours for ${date}`);
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Add manual hours error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -1382,23 +1498,25 @@ export const adminAddManualHours = async (req, res) => {
       status: 'Approved'
     });
 
-    const approvedOT = (attendance.overtimeRequest && attendance.overtimeRequest.status === 'Approved') ? attendance.overtimeRequest.durationMinutes : 0;
-    const { lowTime, extraTime, penaltySeconds, completedOvertime, unfulfilledOvertime } = getFlags(worked, !!hasHalfDay, 0, isHoliday, attendance.checkIn, attendance.isPenaltyDisabled, approvedOT);
-
-    attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
-    attendance.lowTimeFlag = lowTime;
-    attendance.extraTimeFlag = extraTime;
-
-    if (attendance.overtimeRequest) {
-      attendance.overtimeRequest.completedMinutes = completedOvertime || 0;
-      attendance.overtimeRequest.unfulfilledMinutes = unfulfilledOvertime || 0;
-    }
+    const settingsForFlags = await SystemSettings.getSettings();
+    const flags = getFlags(
+      worked,
+      !!hasHalfDay,
+      0,
+      isHoliday,
+      attendance.checkIn,
+      attendance.isPenaltyDisabled,
+      0,
+      date,
+      hasCheckoutOverrideForDate(settingsForFlags, date)
+    );
+    applyFlagsToAttendance(attendance, flags, worked);
 
     await attendance.save();
 
     await logAction(req.user._id, req.user.name, 'ADMIN_ADD_MANUAL_HOURS', 'ATTENDANCE', attendance._id.toString(), `Admin added ${hours} manual hours for user ${userId} on ${date}`);
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Admin add manual hours error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -1424,6 +1542,8 @@ export const adminBulkAddManualHours = async (req, res) => {
     if (userIds.length === 0) {
       return res.json({ message: 'No users found matching the criteria.', updatedCount: 0 });
     }
+
+    const systemSettings = await SystemSettings.getSettings();
 
     // Process each user
     const ops = userIds.map(async (userId) => {
@@ -1453,17 +1573,18 @@ export const adminBulkAddManualHours = async (req, res) => {
         status: 'Approved'
       });
 
-      const approvedOT = (attendance.overtimeRequest && attendance.overtimeRequest.status === 'Approved') ? attendance.overtimeRequest.durationMinutes : 0;
-      const { lowTime, extraTime, penaltySeconds, completedOvertime, unfulfilledOvertime } = getFlags(worked, !!hasHalfDay, 0, isHoliday, attendance.checkIn, attendance.isPenaltyDisabled, approvedOT);
-
-      attendance.totalWorkedSeconds = Math.max(0, worked - penaltySeconds);
-      attendance.lowTimeFlag = lowTime;
-      attendance.extraTimeFlag = extraTime;
-
-      if (attendance.overtimeRequest) {
-        attendance.overtimeRequest.completedMinutes = completedOvertime || 0;
-        attendance.overtimeRequest.unfulfilledMinutes = unfulfilledOvertime || 0;
-      }
+      const flags = getFlags(
+        worked,
+        !!hasHalfDay,
+        0,
+        isHoliday,
+        attendance.checkIn,
+        attendance.isPenaltyDisabled,
+        0,
+        date,
+        hasCheckoutOverrideForDate(systemSettings, date)
+      );
+      applyFlagsToAttendance(attendance, flags, worked);
 
       return attendance.save();
     });
@@ -1483,20 +1604,32 @@ export const requestEarlyCheckout = async (req, res) => {
   try {
     const userId = req.user._id;
     const today = getTodayStr();
-    const { note } = req.body;
+    const { note, durationMinutes } = req.body;
 
     const attendance = await Attendance.findOne({ userId, date: today });
     if (!attendance || !attendance.checkIn) {
       return res.status(404).json({ message: 'No active attendance record found for today' });
     }
 
+    if (attendance.earlyLogoutRequest === 'Pending' || attendance.earlyOvertime?.requestStatus === 'Pending') {
+      return res.status(400).json({ message: 'An early OT request is already pending for today' });
+    }
+
+    const reason = (note || '').trim();
+    if (!attendance.earlyOvertime) {
+      attendance.earlyOvertime = { deficitMinutes: 0, coveredMinutes: 0, status: 'None' };
+    }
+    attendance.earlyOvertime.reason = reason;
+    attendance.earlyOvertime.durationMinutes = durationMinutes ? Math.floor(durationMinutes) : 0;
+    attendance.earlyOvertime.requestStatus = 'Pending';
+    attendance.earlyOvertime.requestedAt = new Date();
     attendance.earlyLogoutRequest = 'Pending';
-    attendance.earlyLogoutRequestNote = note || '';
+    attendance.earlyLogoutRequestNote = reason;
     await attendance.save();
 
-    await logAction(req.user._id, req.user.name, 'REQUEST_EARLY_CHECKOUT', 'ATTENDANCE', attendance._id.toString(), `Requested early checkout: ${note || 'No reason provided'}`);
+    await logAction(req.user._id, req.user.name, 'REQUEST_EARLY_CHECKOUT', 'ATTENDANCE', attendance._id.toString(), `Requested early OT: ${reason || 'No reason provided'}`);
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Request early checkout error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -1518,109 +1651,218 @@ export const reviewEarlyCheckout = async (req, res) => {
     }
 
     attendance.earlyLogoutRequest = status;
-    // Add admin note to existing note if provided
+    if (!attendance.earlyOvertime) {
+      attendance.earlyOvertime = { deficitMinutes: 0, coveredMinutes: 0, status: 'None' };
+    }
+    attendance.earlyOvertime.requestStatus = status;
+    if (status === 'Approved') {
+      attendance.earlyOvertime.approvedBy = req.user._id;
+      attendance.earlyOvertime.approvedAt = new Date();
+    }
     if (adminNote) {
-      attendance.earlyLogoutRequestNote = `${attendance.earlyLogoutRequestNote || ''} | Admin: ${adminNote}`;
+      attendance.earlyLogoutRequestNote = `${attendance.earlyLogoutRequestNote || ''} | Reviewer: ${adminNote}`;
+      if (attendance.earlyOvertime.reason) {
+        attendance.earlyOvertime.reason = `${attendance.earlyOvertime.reason} | Reviewer: ${adminNote}`;
+      }
+    }
+
+    // Recalculate early OT if already checked out
+    if (status === 'Approved' && attendance.checkIn && attendance.checkOut) {
+      const hasHalfDay = await LeaveRequest.findOne({
+        userId: attendance.userId,
+        startDate: attendance.date,
+        category: 'Half Day Leave',
+        status: 'Approved'
+      });
+      const worked = calculateWorkedSeconds(attendance, attendance.checkOut.toISOString());
+      const settings = await SystemSettings.getSettings();
+      const flags = getFlags(
+        worked,
+        !!hasHalfDay,
+        0,
+        false,
+        attendance.checkIn,
+        attendance.isPenaltyDisabled,
+        0,
+        attendance.date,
+        hasCheckoutOverrideForDate(settings, attendance.date)
+      );
+      applyFlagsToAttendance(attendance, flags, worked, {
+        isHalfDayApproved: !!hasHalfDay,
+        earlyLogoutApproved: true
+      });
     }
     
     await attendance.save();
 
     await logAction(req.user._id, req.user.name, 'REVIEW_EARLY_CHECKOUT', 'ATTENDANCE', recordId, `Early checkout ${status} for ${attendance.userId.name}`);
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Review early checkout error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Overtime Request Methods
+// Early Overtime Request Methods
+const assertMinimumShiftForOvertimeRequest = async (attendance, res) => {
+  const hasHalfDay = await LeaveRequest.findOne({
+    userId: attendance.userId,
+    startDate: attendance.date,
+    category: 'Half Day Leave',
+    status: 'Approved'
+  });
+  const minShiftSeconds = hasHalfDay ? HALF_DAY_MIN_SHIFT_SECONDS : FULL_DAY_MIN_SHIFT_SECONDS;
+  const workedSeconds = calculateWorkedSeconds(attendance, new Date().toISOString());
+  if (workedSeconds < minShiftSeconds) {
+    res.status(400).json({
+      message: 'Complete at least 8 hours 15 minutes of work before submitting overtime requests'
+    });
+    return false;
+  }
+  return true;
+};
+
+export const submitEarlyOvertimeRequest = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { reason, durationMinutes, date } = req.body;
+    const targetDate = date || getTodayStr();
+
+    if (!reason?.trim()) {
+      return res.status(400).json({ message: 'Reason is required for early OT request' });
+    }
+    if (!durationMinutes || durationMinutes <= 0) {
+      return res.status(400).json({ message: 'Duration must be greater than 0 minutes' });
+    }
+
+    const attendance = await Attendance.findOne({ userId, date: targetDate });
+    if (!attendance || !attendance.checkIn) {
+      return res.status(404).json({ message: 'No attendance record for this date. Check in first.' });
+    }
+    if (attendance.checkOut) {
+      return res.status(400).json({ message: 'Cannot request early OT after checkout' });
+    }
+
+    if (!(await assertMinimumShiftForOvertimeRequest(attendance, res))) return;
+
+    if (attendance.earlyLogoutRequest === 'Pending' || attendance.earlyOvertime?.requestStatus === 'Pending') {
+      return res.status(400).json({ message: 'An early OT request is already pending for this day' });
+    }
+    if (attendance.earlyLogoutRequest === 'Approved' || attendance.earlyOvertime?.requestStatus === 'Approved') {
+      return res.status(400).json({ message: 'Early OT is already approved for this day' });
+    }
+
+    const prev = attendance.earlyOvertime || {};
+    attendance.earlyOvertime = {
+      ...prev,
+      reason: reason.trim(),
+      durationMinutes: Math.floor(durationMinutes),
+      requestStatus: 'Pending',
+      requestedAt: new Date(),
+      deficitMinutes: prev.deficitMinutes || 0,
+      coveredMinutes: prev.coveredMinutes || 0,
+      status: prev.status || 'None'
+    };
+    attendance.earlyLogoutRequest = 'Pending';
+    attendance.earlyLogoutRequestNote = reason.trim();
+    await attendance.save();
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'REQUEST_EARLY_OVERTIME',
+      'ATTENDANCE',
+      attendance._id.toString(),
+      `Requested ${durationMinutes}m early OT: ${reason.trim()}`
+    );
+
+    res.json(toAttendanceResponse(attendance));
+  } catch (error) {
+    console.error('Submit early overtime error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const getPendingEarlyOvertimeRequests = async (req, res) => {
+  try {
+    const records = await Attendance.find({
+      $or: [
+        { earlyLogoutRequest: 'Pending' },
+        { 'earlyOvertime.requestStatus': 'Pending' }
+      ]
+    })
+      .populate('userId', 'name department')
+      .sort({ 'earlyOvertime.requestedAt': -1, updatedAt: -1 });
+
+    res.json(records.map(toAttendanceListResponse));
+  } catch (error) {
+    console.error('Get pending early overtime error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Management Overtime Request Methods
 export const submitOvertimeRequest = async (req, res) => {
   try {
     const userId = req.user._id;
     const { reason, durationMinutes, date } = req.body;
     const targetDate = date || getTodayStr();
 
+    if (!reason?.trim()) {
+      return res.status(400).json({ message: 'Reason is required for management overtime' });
+    }
+    if (!durationMinutes || durationMinutes <= 0) {
+      return res.status(400).json({ message: 'Duration must be greater than 0 minutes' });
+    }
+
     const attendance = await Attendance.findOne({ userId, date: targetDate });
     if (!attendance || !attendance.checkIn) {
-      return res.status(400).json({ message: `No attendance record found for ${targetDate}. You must be checked in to request overtime.` });
+      return res.status(404).json({ message: 'No attendance record for this date. Check in first.' });
     }
 
-    if (attendance.overtimeRequest && attendance.overtimeRequest.status !== 'None') {
-      return res.status(400).json({ message: 'Overtime request already exists for today' });
+    if (!(await assertMinimumShiftForOvertimeRequest(attendance, res))) return;
+
+    if (attendance.managementOvertime?.status === 'Pending') {
+      return res.status(400).json({ message: 'A management overtime request is already pending for this day' });
+    }
+    if (attendance.managementOvertime?.status === 'Approved') {
+      return res.status(400).json({ message: 'Management overtime is already approved for this day' });
     }
 
-    // Eligible when net worked time (same rules as getFlags) exceeds the "normal" band:
-    // full day > 8h 22m; half-day leave day > half of that; holiday: any work; Extra Time Leave adds credit minutes.
-    const nowStr = new Date().toISOString();
-    const workedSeconds = calculateWorkedSeconds(attendance, attendance.checkOut ? attendance.checkOut.toISOString() : nowStr);
-
-    const isHolidayWork = await checkIsHoliday(targetDate);
-    const hasHalfDay = await LeaveRequest.findOne({
-      userId,
-      startDate: targetDate,
-      category: 'Half Day Leave',
-      status: 'Approved'
-    });
-
-    let extraTimeLeaveMinutes = 0;
-    const extraTimeLeave = await LeaveRequest.findOne({
-      userId,
-      startDate: targetDate,
-      category: 'Extra Time Leave',
-      status: 'Approved'
-    });
-    if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
-      const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
-      const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
-      const startMinutes = startH * 60 + startM;
-      const endMinutes = endH * 60 + endM;
-      extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
-    }
-
-    // Pre-policy date so extraTime reflects only "worked past normal" (not the April 6+ approved-OT rule)
-    const flags = getFlags(
-      workedSeconds,
-      !!hasHalfDay,
-      extraTimeLeaveMinutes,
-      isHolidayWork,
-      attendance.checkIn,
-      attendance.isPenaltyDisabled,
-      0,
-      '2026-04-05'
-    );
-    if (!flags.extraTime) {
-      const msg = isHolidayWork
-        ? 'No worked time to request as overtime for this day'
-        : (hasHalfDay
-          ? 'Overtime request is only available after you exceed half-day normal hours (per policy, same as extra time)'
-          : 'Overtime request only allowed after 8 hours and 22 minutes of work (or equivalent with Extra Time Leave credit)');
-      return res.status(400).json({ message: msg });
-    }
-
-    attendance.overtimeRequest = {
-      reason,
-      durationMinutes: Number(durationMinutes),
+    attendance.managementOvertime = {
+      reason: reason.trim(),
+      durationMinutes: Math.floor(durationMinutes),
       status: 'Pending',
-      requestedAt: new Date()
+      requestedAt: new Date(),
+      completedMinutes: 0
     };
-
     await attendance.save();
-    res.json(attendance);
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'REQUEST_MANAGEMENT_OVERTIME',
+      'ATTENDANCE',
+      attendance._id.toString(),
+      `Requested ${durationMinutes}m management OT: ${reason.trim()}`
+    );
+
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
-    console.error('Submit overtime request error:', error);
+    console.error('Submit management overtime error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
 export const getPendingOvertimeRequests = async (req, res) => {
   try {
-    const requests = await Attendance.find({ 
-      'overtimeRequest.status': 'Pending' 
-    }).populate('userId', 'name department');
-    res.json(requests);
+    const records = await Attendance.find({ 'managementOvertime.status': 'Pending' })
+      .populate('userId', 'name username email department role')
+      .sort({ 'managementOvertime.requestedAt': -1 });
+    res.json(toAttendanceListResponse(records));
   } catch (error) {
-    console.error('Get pending overtime requests error:', error);
+    console.error('Get pending management overtime error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -1628,7 +1870,7 @@ export const getPendingOvertimeRequests = async (req, res) => {
 export const reviewOvertimeRequest = async (req, res) => {
   try {
     const { recordId } = req.params;
-    const { status } = req.body;
+    const { status, adminNote } = req.body;
 
     if (!['Approved', 'Rejected'].includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
@@ -1639,41 +1881,94 @@ export const reviewOvertimeRequest = async (req, res) => {
       return res.status(404).json({ message: 'Attendance record not found' });
     }
 
-    attendance.overtimeRequest.status = status;
-    attendance.overtimeRequest.approvedBy = req.user._id;
-    attendance.overtimeRequest.approvedAt = new Date();
+    if (attendance.managementOvertime?.status !== 'Pending') {
+      return res.status(400).json({ message: 'No pending management overtime request for this record' });
+    }
 
+    attendance.managementOvertime.status = status;
     if (status === 'Approved') {
-      // Recalculate worked time and flags
-      const isHoliday = await checkIsHoliday(attendance.date);
-      const hasHalfDay = await LeaveRequest.findOne({
-        userId: attendance.userId._id,
-        startDate: attendance.date,
-        category: 'Half Day Leave',
-        status: 'Approved'
-      });
+      attendance.managementOvertime.completedMinutes = attendance.managementOvertime.durationMinutes;
+      attendance.managementOvertime.approvedBy = req.user._id;
+      attendance.managementOvertime.approvedAt = new Date();
+      attendance.extraTimeFlag = true;
+    } else {
+      attendance.managementOvertime.completedMinutes = 0;
+    }
 
-      const worked = calculateWorkedSeconds(attendance, attendance.checkOut ? attendance.checkOut.toISOString() : undefined);
-      const approvedOT = attendance.overtimeRequest.durationMinutes || 0;
-      const flags = getFlags(worked, !!hasHalfDay, 0, isHoliday, attendance.checkIn, attendance.isPenaltyDisabled, approvedOT);
-      
-      attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
-      attendance.lowTimeFlag = flags.lowTime;
-      attendance.extraTimeFlag = flags.extraTime;
-
-      if (attendance.overtimeRequest) {
-        attendance.overtimeRequest.completedMinutes = flags.completedOvertime || 0;
-        attendance.overtimeRequest.unfulfilledMinutes = flags.unfulfilledOvertime || 0;
-      }
+    if (adminNote?.trim()) {
+      attendance.managementOvertime.reason = `${attendance.managementOvertime.reason} | Reviewer: ${adminNote.trim()}`;
     }
 
     await attendance.save();
 
-    await logAction(req.user._id, req.user.name, 'REVIEW_OVERTIME', 'ATTENDANCE', recordId, `Overtime request ${status} for ${attendance.userId.name}`);
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'REVIEW_MANAGEMENT_OVERTIME',
+      'ATTENDANCE',
+      recordId,
+      `Management OT ${status} for ${attendance.userId?.name || 'employee'}`
+    );
 
-    res.json(attendance);
+    res.json(toAttendanceResponse(attendance));
   } catch (error) {
-    console.error('Review overtime request error:', error);
+    console.error('Review management overtime error:', error);
     res.status(500).json({ message: 'Server error' });
   }
+};
+
+/** Recalculate low/extra flags for all checked-out records on a date (e.g. after checkout override change). */
+export const recalculateAttendanceFlagsForDate = async (dateStr) => {
+  if (!dateStr) return { updated: 0 };
+
+  const settings = await SystemSettings.getSettings();
+  const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, dateStr);
+
+  const records = await Attendance.find({
+    date: dateStr,
+    checkOut: { $exists: true, $ne: null },
+    isManualFlag: { $ne: true }
+  });
+
+  let updated = 0;
+  for (const record of records) {
+    const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+    const isHolidayWork = !!(await CompanyHoliday.findOne({ date: dateStr }));
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId: record.userId,
+      startDate: dateStr,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+
+    let extraTimeLeaveMinutes = 0;
+    const extraTimeLeave = await LeaveRequest.findOne({
+      userId: record.userId,
+      startDate: dateStr,
+      category: 'Extra Time Leave',
+      status: 'Approved'
+    });
+    if (extraTimeLeave?.startTime && extraTimeLeave?.endTime) {
+      const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+      const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+      extraTimeLeaveMinutes = Math.max(0, endH * 60 + endM - (startH * 60 + startM));
+    }
+
+    const flags = getFlags(
+      worked,
+      !!hasHalfDay,
+      extraTimeLeaveMinutes,
+      isHolidayWork,
+      record.checkIn,
+      record.isPenaltyDisabled,
+      0,
+      dateStr,
+      isEarlyReleaseDay
+    );
+    applyFlagsToAttendance(record, flags, worked);
+    await record.save();
+    updated += 1;
+  }
+
+  return { updated, total: records.length };
 };

@@ -20,6 +20,8 @@ import {
   getTodayAllAttendance,
   requestEarlyCheckout,
   reviewEarlyCheckout,
+  submitEarlyOvertimeRequest,
+  getPendingEarlyOvertimeRequests,
   submitOvertimeRequest,
   getPendingOvertimeRequests,
   reviewOvertimeRequest
@@ -39,6 +41,7 @@ router.post('/break/cancel', cancelBreak);
 router.get('/today', getTodayAttendance);
 router.get('/history', getAttendanceHistory);
 router.post('/request-early-checkout', requestEarlyCheckout);
+router.post('/request-early-overtime', submitEarlyOvertimeRequest);
 router.post('/request-overtime', submitOvertimeRequest);
 
 // Admin/HR routes
@@ -51,6 +54,7 @@ router.post('/admin/recalculate-holiday-flags', authorize('HR', 'Admin'), recalc
 router.post('/admin/recalculate-halfday-flags', authorize('HR', 'Admin'), recalculateHalfDayFlags);
 router.post('/manual-hours', addManualHours);
 router.post('/admin/review-early-checkout/:recordId', authorize('HR', 'Admin'), reviewEarlyCheckout);
+router.get('/admin/pending-early-overtime', authorize('HR', 'Admin'), getPendingEarlyOvertimeRequests);
 router.get('/admin/pending-overtime', authorize('HR', 'Admin'), getPendingOvertimeRequests);
 router.post('/admin/review-overtime/:recordId', authorize('HR', 'Admin'), reviewOvertimeRequest);
 router.put('/:recordId', authorize('HR', 'Admin'), adminUpdateAttendance);
