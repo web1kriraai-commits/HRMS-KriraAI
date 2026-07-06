@@ -646,7 +646,7 @@ export const getEmployeeStats = async (req, res) => {
           }
 
           const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, latePenaltyStartTime);
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, latePenaltyStartTime, systemSettings?.timezone || 'Asia/Kolkata');
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;
           record.totalWorkedSeconds = worked;
