@@ -113,8 +113,10 @@ const attendanceSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  /** Auto-calculated daily OT above 8h 15m */
+  /** Auto-calculated daily OT above 8h 15m, AFTER Management OT / Early OT repayment are carved out */
   generalOvertimeMinutes: { type: Number, default: 0 },
+  /** Internal: total minutes worked above the minimum shift threshold, BEFORE any bucket allocation. Anchor for recalculateOvertimeBuckets. */
+  rawOvertimeSurplusMinutes: { type: Number, default: 0 },
   /** Admin-approved management OT (employee request) */
   managementOvertime: {
     reason: { type: String, trim: true },
@@ -148,6 +150,26 @@ const attendanceSchema = new mongoose.Schema({
       enum: ['None', 'Pending', 'Partial', 'Covered'],
       default: 'None'
     }
+  },
+  /**
+   * Explicit employee request to repay a previous early-checkout deficit by working
+   * extra minutes on this day. Decoupled from `earlyOvertime` (which tracks the deficit
+   * itself on the day it was incurred) and from `earlyLogoutRequest` (leaving early today).
+   * Only the approved + applied amount is diverted away from generalOvertimeMinutes.
+   */
+  earlyOvertimeRepayment: {
+    requestedMinutes: { type: Number, default: 0 },
+    reason: { type: String, trim: true },
+    status: {
+      type: String,
+      enum: ['None', 'Pending', 'Approved', 'Rejected'],
+      default: 'None'
+    },
+    requestedAt: { type: Date },
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    approvedAt: { type: Date },
+    /** Actual minutes credited as repayment after checkout, capped by surplus + outstanding deficit in the same month */
+    appliedMinutes: { type: Number, default: 0 }
   },
   /** @deprecated Legacy field — kept for backward compatibility */
   overtimeRequest: {

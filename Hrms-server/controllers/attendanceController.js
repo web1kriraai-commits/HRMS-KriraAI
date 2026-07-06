@@ -3,7 +3,7 @@ import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
 import SystemSettings from '../models/SystemSettings.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, recalculateOvertimeBuckets, getMonthKey, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields, resolveLatePenaltyStartTime } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
 /** Ensure API responses include new OT fields without stripping legacy data. */
@@ -41,6 +41,28 @@ const checkIsHoliday = async (dateStr) => {
   return !!holiday;
 };
 
+/**
+ * All of a user's attendance records in the same calendar month as `dateStr` that carry an
+ * early-checkout deficit (regardless of current outstanding/covered state — the full set is
+ * needed so `recalculateOvertimeBuckets` can idempotently undo/reapply repayment coverage).
+ */
+const getSameMonthDeficitRecords = async (userId, dateStr, excludeId = null) => {
+  const monthKey = getMonthKey(dateStr);
+  const query = {
+    userId,
+    date: { $regex: `^${monthKey}` },
+    'earlyOvertime.deficitMinutes': { $gt: 0 }
+  };
+  if (excludeId) query._id = { $ne: excludeId };
+  return Attendance.find(query).sort({ date: 1 });
+};
+
+const getOutstandingDeficitMinutesInMonth = (records) =>
+  records.reduce((sum, r) => {
+    const eo = r.earlyOvertime || {};
+    return sum + Math.max(0, (eo.deficitMinutes || 0) - (eo.coveredMinutes || 0));
+  }, 0);
+
 export const clockIn = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -55,10 +77,11 @@ export const clockIn = async (req, res) => {
     const now = new Date();
 
     const isHoliday = await checkIsHoliday(today);
+    const settings = await SystemSettings.getSettings();
+    const latePenaltyStartTime = resolveLatePenaltyStartTime(settings);
 
     // Check-in from configured time (default 08:30, company timezone). Admins exempt.
     if (req.user.role !== 'Admin') {
-      const settings = await SystemSettings.getSettings();
       const tz = settings?.timezone || 'Asia/Kolkata';
       const dateInTz = getDateStrInTimezone(now, tz);
       const { hour: checkInHour, minute: checkInMinute } = resolveCheckInTimeForDate(settings, dateInTz);
@@ -79,7 +102,7 @@ export const clockIn = async (req, res) => {
     // If a record already exists (e.g. created by admin as a waiver), use its isPenaltyDisabled flag
     const isPenaltyDisabled = existing ? !!existing.isPenaltyDisabled : false;
 
-    const { lateCheckIn, penaltySeconds } = getFlags(0, !!hasHalfDay, 0, isHoliday, now, isPenaltyDisabled);
+    const { lateCheckIn, penaltySeconds } = getFlags(0, !!hasHalfDay, 0, isHoliday, now, isPenaltyDisabled, 0, null, false, latePenaltyStartTime);
 
     let attendance;
     if (existing) {
@@ -240,7 +263,8 @@ export const clockOut = async (req, res) => {
       attendance.isPenaltyDisabled,
       0,
       today,
-      isEarlyReleaseDay
+      isEarlyReleaseDay,
+      resolveLatePenaltyStartTime(settings)
     );
     applyFlagsToAttendance(attendance, flags, worked, {
       isHalfDayApproved: !!hasHalfDay,
@@ -248,18 +272,12 @@ export const clockOut = async (req, res) => {
       extraTimeLeaveMinutes
     });
 
-    // Use general OT surplus to cover outstanding early-checkout deficits (oldest first)
-    const generalMins = attendance.generalOvertimeMinutes || 0;
-    if (generalMins > 0) {
-      const deficitRecords = await Attendance.find({
-        userId,
-        'earlyOvertime.deficitMinutes': { $gt: 0 },
-        _id: { $ne: attendance._id }
-      }).sort({ date: 1 });
-      if (deficitRecords.length > 0) {
-        allocateEarlyOvertimeCoverage(deficitRecords, generalMins);
-        await Promise.all(deficitRecords.map((r) => r.save()));
-      }
+    // Redistribute today's OT-eligible surplus across Management OT / approved Early OT
+    // repayment BEFORE counting the remainder as General OT (no double counting).
+    const sameMonthDeficitRecords = await getSameMonthDeficitRecords(userId, today, attendance._id);
+    recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
+    if (sameMonthDeficitRecords.length > 0) {
+      await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
     }
 
     await attendance.save();
@@ -430,7 +448,8 @@ export const getAttendanceHistory = async (req, res) => {
           record.isPenaltyDisabled,
           0,
           record.date,
-          hasCheckoutOverrideForDate(settings, record.date)
+          hasCheckoutOverrideForDate(settings, record.date),
+          resolveLatePenaltyStartTime(settings)
         );
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
@@ -592,7 +611,8 @@ export const adminCreateAttendance = async (req, res) => {
           !!isPenaltyDisabled || !!attendance.isPenaltyDisabled,
           0,
           attendance.date,
-          hasCheckoutOverrideForDate(settings, attendance.date)
+          hasCheckoutOverrideForDate(settings, attendance.date),
+          resolveLatePenaltyStartTime(settings)
         );
         // Store penalty-adjusted worked time so displayed hours already reflect the deduction
         attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
@@ -748,7 +768,8 @@ export const adminCreateAttendance = async (req, res) => {
         !!isPenaltyDisabled,
         0,
         date,
-        hasCheckoutOverrideForDate(settingsForFlags, date)
+        hasCheckoutOverrideForDate(settingsForFlags, date),
+        resolveLatePenaltyStartTime(settingsForFlags)
       );
       // Store penalty-adjusted worked time so displayed hours already reflect the deduction
       attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
@@ -924,7 +945,8 @@ export const adminUpdateAttendance = async (req, res) => {
         attendance.isPenaltyDisabled,
         0,
         attendance.date,
-        hasCheckoutOverrideForDate(settingsForFlags, attendance.date)
+        hasCheckoutOverrideForDate(settingsForFlags, attendance.date),
+        resolveLatePenaltyStartTime(settingsForFlags)
       );
       applyFlagsToAttendance(attendance, flags, worked);
     } else if (attendance.checkIn && attendance.checkOut) {
@@ -1055,7 +1077,8 @@ export const getAllAttendance = async (req, res) => {
         record.isPenaltyDisabled,
         0,
         record.date,
-        isEarlyReleaseDay
+        isEarlyReleaseDay,
+        resolveLatePenaltyStartTime(systemSettings)
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1147,7 +1170,8 @@ export const getTodayAllAttendance = async (req, res) => {
         record.isPenaltyDisabled,
         0,
         today,
-        isEarlyReleaseToday
+        isEarlyReleaseToday,
+        resolveLatePenaltyStartTime(systemSettings)
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1345,7 +1369,8 @@ export const recalculateHalfDayFlags = async (req, res) => {
         record.isPenaltyDisabled,
         0,
         record.date,
-        hasCheckoutOverrideForDate(systemSettings, record.date)
+        hasCheckoutOverrideForDate(systemSettings, record.date),
+        resolveLatePenaltyStartTime(systemSettings)
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1444,7 +1469,8 @@ export const addManualHours = async (req, res) => {
       attendance.isPenaltyDisabled,
       0,
       date,
-      hasCheckoutOverrideForDate(settingsForFlags, date)
+      hasCheckoutOverrideForDate(settingsForFlags, date),
+      resolveLatePenaltyStartTime(settingsForFlags)
     );
     applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1503,7 +1529,8 @@ export const adminAddManualHours = async (req, res) => {
       attendance.isPenaltyDisabled,
       0,
       date,
-      hasCheckoutOverrideForDate(settingsForFlags, date)
+      hasCheckoutOverrideForDate(settingsForFlags, date),
+      resolveLatePenaltyStartTime(settingsForFlags)
     );
     applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1577,7 +1604,8 @@ export const adminBulkAddManualHours = async (req, res) => {
         attendance.isPenaltyDisabled,
         0,
         date,
-        hasCheckoutOverrideForDate(systemSettings, date)
+        hasCheckoutOverrideForDate(systemSettings, date),
+        resolveLatePenaltyStartTime(systemSettings)
       );
       applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1680,7 +1708,8 @@ export const reviewEarlyCheckout = async (req, res) => {
         attendance.isPenaltyDisabled,
         0,
         attendance.date,
-        hasCheckoutOverrideForDate(settings, attendance.date)
+        hasCheckoutOverrideForDate(settings, attendance.date),
+        resolveLatePenaltyStartTime(settings)
       );
       applyFlagsToAttendance(attendance, flags, worked, {
         isHalfDayApproved: !!hasHalfDay,
@@ -1790,7 +1819,7 @@ export const getPendingEarlyOvertimeRequests = async (req, res) => {
       .populate('userId', 'name department')
       .sort({ 'earlyOvertime.requestedAt': -1, updatedAt: -1 });
 
-    res.json(records.map(toAttendanceListResponse));
+    res.json(toAttendanceListResponse(records));
   } catch (error) {
     console.error('Get pending early overtime error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -1894,6 +1923,16 @@ export const reviewOvertimeRequest = async (req, res) => {
       attendance.managementOvertime.reason = `${attendance.managementOvertime.reason} | Reviewer: ${adminNote.trim()}`;
     }
 
+    // Management OT minutes must not also be counted as General OT — recompute the buckets
+    // if the shift is already complete (either checked out, or already past minimum shift).
+    if (attendance.checkOut) {
+      const sameMonthDeficitRecords = await getSameMonthDeficitRecords(attendance.userId._id || attendance.userId, attendance.date, attendance._id);
+      recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
+      if (sameMonthDeficitRecords.length > 0) {
+        await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+      }
+    }
+
     await attendance.save();
 
     await logAction(
@@ -1908,6 +1947,138 @@ export const reviewOvertimeRequest = async (req, res) => {
     res.json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Review management overtime error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Early Overtime Repayment Methods
+// Explicit apply -> approve -> start flow for repaying a previous early-checkout deficit by
+// working extra minutes on another day within the same calendar month. Decoupled from the
+// "leave early today" flow (requestEarlyCheckout/reviewEarlyCheckout) and from Management OT.
+export const submitEarlyOvertimeRepaymentRequest = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { reason, durationMinutes, date } = req.body;
+    const targetDate = date || getTodayStr();
+
+    if (!reason?.trim()) {
+      return res.status(400).json({ message: 'Reason is required for early OT repayment' });
+    }
+    if (!durationMinutes || durationMinutes <= 0) {
+      return res.status(400).json({ message: 'Duration must be greater than 0 minutes' });
+    }
+
+    const attendance = await Attendance.findOne({ userId, date: targetDate });
+    if (!attendance || !attendance.checkIn) {
+      return res.status(404).json({ message: 'No attendance record for this date. Check in first.' });
+    }
+
+    if (!(await assertMinimumShiftForOvertimeRequest(attendance, res))) return;
+
+    if (attendance.earlyOvertimeRepayment?.status === 'Pending') {
+      return res.status(400).json({ message: 'An early OT repayment request is already pending for this day' });
+    }
+    if (attendance.earlyOvertimeRepayment?.status === 'Approved') {
+      return res.status(400).json({ message: 'Early OT repayment is already approved for this day' });
+    }
+
+    const sameMonthDeficitRecords = await getSameMonthDeficitRecords(userId, targetDate, attendance._id);
+    const outstandingThisMonth = getOutstandingDeficitMinutesInMonth(sameMonthDeficitRecords);
+    if (outstandingThisMonth <= 0) {
+      return res.status(400).json({ message: 'No outstanding early-checkout deficit to repay this month' });
+    }
+
+    attendance.earlyOvertimeRepayment = {
+      requestedMinutes: Math.floor(durationMinutes),
+      reason: reason.trim(),
+      status: 'Pending',
+      requestedAt: new Date(),
+      appliedMinutes: 0
+    };
+    await attendance.save();
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'REQUEST_EARLY_OT_REPAYMENT',
+      'ATTENDANCE',
+      attendance._id.toString(),
+      `Requested ${durationMinutes}m early OT repayment: ${reason.trim()}`
+    );
+
+    res.json(toAttendanceResponse(attendance));
+  } catch (error) {
+    console.error('Submit early OT repayment error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const getPendingEarlyOvertimeRepaymentRequests = async (req, res) => {
+  try {
+    const records = await Attendance.find({ 'earlyOvertimeRepayment.status': 'Pending' })
+      .populate('userId', 'name username email department role')
+      .sort({ 'earlyOvertimeRepayment.requestedAt': -1 });
+    res.json(toAttendanceListResponse(records));
+  } catch (error) {
+    console.error('Get pending early OT repayment error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const reviewEarlyOvertimeRepayment = async (req, res) => {
+  try {
+    const { recordId } = req.params;
+    const { status, adminNote } = req.body;
+
+    if (!['Approved', 'Rejected'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const attendance = await Attendance.findById(recordId).populate('userId', 'name');
+    if (!attendance) {
+      return res.status(404).json({ message: 'Attendance record not found' });
+    }
+
+    if (attendance.earlyOvertimeRepayment?.status !== 'Pending') {
+      return res.status(400).json({ message: 'No pending early OT repayment request for this record' });
+    }
+
+    attendance.earlyOvertimeRepayment.status = status;
+    if (status === 'Approved') {
+      attendance.earlyOvertimeRepayment.approvedBy = req.user._id;
+      attendance.earlyOvertimeRepayment.approvedAt = new Date();
+    } else {
+      attendance.earlyOvertimeRepayment.appliedMinutes = 0;
+    }
+
+    if (adminNote?.trim()) {
+      attendance.earlyOvertimeRepayment.reason = `${attendance.earlyOvertimeRepayment.reason} | Reviewer: ${adminNote.trim()}`;
+    }
+
+    // Only approved+applied minutes are diverted away from General OT — recompute now if the
+    // shift for that day is already complete.
+    if (attendance.checkOut) {
+      const sameMonthDeficitRecords = await getSameMonthDeficitRecords(attendance.userId._id || attendance.userId, attendance.date, attendance._id);
+      recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
+      if (sameMonthDeficitRecords.length > 0) {
+        await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+      }
+    }
+
+    await attendance.save();
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'REVIEW_EARLY_OT_REPAYMENT',
+      'ATTENDANCE',
+      recordId,
+      `Early OT repayment ${status} for ${attendance.userId?.name || 'employee'}`
+    );
+
+    res.json(toAttendanceResponse(attendance));
+  } catch (error) {
+    console.error('Review early OT repayment error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -1958,7 +2129,8 @@ export const recalculateAttendanceFlagsForDate = async (dateStr) => {
       record.isPenaltyDisabled,
       0,
       dateStr,
-      isEarlyReleaseDay
+      isEarlyReleaseDay,
+      resolveLatePenaltyStartTime(settings)
     );
     applyFlagsToAttendance(record, flags, worked);
     await record.save();

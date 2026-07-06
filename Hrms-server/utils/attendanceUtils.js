@@ -13,7 +13,7 @@ const MAX_NORMAL_MINUTES = 502; // 8h 22m (upper bound for normal)
 export const HALF_DAY_MIN_SHIFT_SECONDS = Math.floor(MIN_NORMAL_MINUTES / 2) * 60;
 export const FULL_DAY_MIN_SHIFT_SECONDS = MIN_NORMAL_MINUTES * 60;
 const HALF_DAY_THRESHOLD_MINUTES = 240; // 4h 0m (standard half-day duration)
-const LATE_CHECKIN_HOUR = 9; // 9:00 AM cutoff
+export const DEFAULT_LATE_PENALTY_START_TIME = '09:00';
 /** Earliest time employees may clock in (non-admin), in company local time */
 export const EARLIEST_CHECK_IN_HOUR = 8;
 export const EARLIEST_CHECK_IN_MINUTE = 30;
@@ -42,28 +42,30 @@ export const COMPULSORY_BREAK_EFFECTIVE_DATE = '2026-04-06';
 /** Minimum combined Break + Extra Break time required before checkout (20 minutes). */
 export const MIN_TOTAL_BREAK_SECONDS = 1200;
 
+export const resolveLatePenaltyStartTime = (settings) =>
+  settings?.latePenaltyStartTime || DEFAULT_LATE_PENALTY_START_TIME;
+
 /**
- * Returns true if the checkInTime is after 9:00:00 AM local time.
+ * Returns true if checkInTime is after the configured penalty start time (default 09:00:00).
  */
-export const isLateCheckIn = (checkInTime) => {
+export const isLateCheckIn = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME) => {
   if (!checkInTime) return false;
   const d = new Date(checkInTime);
-  const hours = d.getHours();
-  const minutes = d.getMinutes();
-  const seconds = d.getSeconds();
-  // Late if after exactly 09:00:00
-  return (hours > LATE_CHECKIN_HOUR) ||
-    (hours === LATE_CHECKIN_HOUR && (minutes > 0 || seconds > 0));
+  const { hour: cutoffH, minute: cutoffM } = parseCheckInTime(latePenaltyStartTime);
+  const checkInSecs = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+  const cutoffSecs = cutoffH * 3600 + cutoffM * 60;
+  return checkInSecs > cutoffSecs;
 };
 
 /**
- * Calculates how many seconds late the check-in was relative to 09:00 AM.
+ * Seconds late relative to the configured penalty start time (default 09:00 AM).
  */
-export const calculateLatenessSeconds = (checkInTime) => {
+export const calculateLatenessSeconds = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME) => {
   if (!checkInTime) return 0;
   const d = new Date(checkInTime);
+  const { hour: cutoffH, minute: cutoffM } = parseCheckInTime(latePenaltyStartTime);
   const cutoff = new Date(checkInTime);
-  cutoff.setHours(LATE_CHECKIN_HOUR, 0, 0, 0);
+  cutoff.setHours(cutoffH, cutoffM, 0, 0);
 
   const diff = d.getTime() - cutoff.getTime();
   return Math.max(0, Math.floor(diff / 1000));
@@ -122,7 +124,7 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
  * @param {boolean} isEarlyReleaseDay - Admin set per-day checkout override; no low time for that day
  * @returns {{ lowTime: boolean, extraTime: boolean, lateCheckIn: boolean, penaltySeconds: number, completedOvertime: number, unfulfilledOvertime: number }}
  */
-export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0, dateStr = null, isEarlyReleaseDay = false) => {
+export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0, dateStr = null, isEarlyReleaseDay = false, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME) => {
   // Holiday rule: if employee works on a holiday, entire duration is overtime, no penalty
   if (isHolidayWork) {
     const holidayMins = Math.floor(workedSeconds / 60);
@@ -139,7 +141,7 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
 
   // Late check-in penalty: deduct 15 minutes from effective worked time
   // ONLY apply penalty if date is on or after PENALTY_EFFECTIVE_DATE AND penalties are not disabled
-  const late = isLateCheckIn(checkInTime);
+  const late = isLateCheckIn(checkInTime, latePenaltyStartTime);
   let penaltySeconds = 0;
 
   // Half-day leave: no late check-in penalty for that date (low-time uses halved thresholds separately)
@@ -149,10 +151,10 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
+    const checkInDateStr = `${year}-${month}-${day}`;
 
-    if (dateStr >= PENALTY_EFFECTIVE_DATE) {
-      const actualLatenessSeconds = calculateLatenessSeconds(checkInTime);
+    if (checkInDateStr >= PENALTY_EFFECTIVE_DATE) {
+      const actualLatenessSeconds = calculateLatenessSeconds(checkInTime, latePenaltyStartTime);
       // Penalty is MIN_LATE_PENALTY_SECONDS (15 mins) OR actual lateness, whichever is greater
       penaltySeconds = Math.max(MIN_LATE_PENALTY_SECONDS, actualLatenessSeconds);
     }
@@ -247,6 +249,85 @@ export const allocateEarlyOvertimeCoverage = (records, surplusMinutes) => {
   return remaining;
 };
 
+/** Calendar month key (YYYY-MM) for a YYYY-MM-DD date string. */
+export const getMonthKey = (dateStr) => (dateStr || '').slice(0, 7);
+
+/**
+ * Redistribute a day's OT-eligible surplus across Management OT and any approved Early OT
+ * repayment BEFORE what remains is counted as General OT, so the same worked minutes are
+ * never counted in more than one bucket.
+ *
+ * Idempotent: safe to call more than once for the same day (e.g. Management OT approved at
+ * checkout, then Early OT repayment approved later, or vice versa) because it always starts
+ * from `rawOvertimeSurplusMinutes` and first undoes any repayment it previously applied to
+ * `sameMonthDeficitRecords` before recomputing from scratch.
+ *
+ * @param {object} attendance - Today's attendance record (mutated in place)
+ * @param {object[]} sameMonthDeficitRecords - ALL other attendance records for this user in the
+ *   same calendar month as `attendance.date` that have `earlyOvertime.deficitMinutes > 0`
+ *   (regardless of current outstanding/covered state), sorted oldest-first. Mutated in place
+ *   (caller must persist them) when repayment is applied or undone.
+ * @returns {{ mgmtMinutes: number, repaymentMinutes: number, generalOvertimeMinutes: number }}
+ */
+export const recalculateOvertimeBuckets = (attendance, sameMonthDeficitRecords = []) => {
+  const rawGeneralMinutes = attendance.rawOvertimeSurplusMinutes || attendance.generalOvertimeMinutes || 0;
+
+  // Undo any repayment this record previously applied, so re-running this function with a
+  // different Management OT / repayment approval state doesn't compound on stale allocations.
+  let previouslyApplied = attendance.earlyOvertimeRepayment?.appliedMinutes || 0;
+  for (const record of sameMonthDeficitRecords) {
+    if (previouslyApplied <= 0) break;
+    const eo = record.earlyOvertime;
+    if (!eo || !eo.coveredMinutes) continue;
+    const undoAmount = Math.min(previouslyApplied, eo.coveredMinutes);
+    eo.coveredMinutes -= undoAmount;
+    previouslyApplied -= undoAmount;
+    syncEarlyOvertimeStatus(record);
+  }
+
+  const mgmtApproved = attendance.managementOvertime?.status === 'Approved';
+  const mgmtCompleted = mgmtApproved
+    ? (attendance.managementOvertime.completedMinutes || attendance.managementOvertime.durationMinutes || 0)
+    : 0;
+  const mgmtMinutes = Math.min(mgmtCompleted, rawGeneralMinutes);
+
+  const remainingAfterMgmt = rawGeneralMinutes - mgmtMinutes;
+
+  const repaymentApproved = attendance.earlyOvertimeRepayment?.status === 'Approved';
+  const requestedRepaymentMinutes = repaymentApproved
+    ? (attendance.earlyOvertimeRepayment.requestedMinutes || 0)
+    : 0;
+
+  const outstandingDeficitInMonth = sameMonthDeficitRecords.reduce((sum, r) => {
+    const eo = r.earlyOvertime || {};
+    return sum + Math.max(0, (eo.deficitMinutes || 0) - (eo.coveredMinutes || 0));
+  }, 0);
+
+  const repaymentMinutes = repaymentApproved
+    ? Math.min(requestedRepaymentMinutes, remainingAfterMgmt, outstandingDeficitInMonth)
+    : 0;
+
+  if (attendance.earlyOvertimeRepayment) {
+    attendance.earlyOvertimeRepayment.appliedMinutes = repaymentMinutes;
+  }
+
+  if (repaymentMinutes > 0) {
+    allocateEarlyOvertimeCoverage(sameMonthDeficitRecords, repaymentMinutes);
+  }
+
+  const finalGeneralMinutes = Math.max(0, remainingAfterMgmt - repaymentMinutes);
+  attendance.generalOvertimeMinutes = finalGeneralMinutes;
+  attendance.rawOvertimeSurplusMinutes = rawGeneralMinutes;
+
+  const legacyGeneral = getLegacyGeneralOvertimeMinutes(attendance);
+  attendance.extraTimeFlag =
+    finalGeneralMinutes > 0 ||
+    legacyGeneral > 0 ||
+    mgmtMinutes > 0;
+
+  return { mgmtMinutes, repaymentMinutes, generalOvertimeMinutes: finalGeneralMinutes };
+};
+
 /** Read general OT from legacy overtimeRequest without losing historical values. */
 export const getLegacyGeneralOvertimeMinutes = (attendance) => {
   const stored = attendance?.generalOvertimeMinutes;
@@ -290,6 +371,15 @@ export const hydrateAttendanceOvertimeFields = (attendance) => {
       durationMinutes: 0,
       status: 'None',
       completedMinutes: 0
+    };
+  }
+
+  if (!doc.earlyOvertimeRepayment) {
+    doc.earlyOvertimeRepayment = {
+      requestedMinutes: 0,
+      reason: '',
+      status: 'None',
+      appliedMinutes: 0
     };
   }
 
@@ -339,6 +429,7 @@ export const syncAllOvertimeRecords = (attendance, flags, context = {}) => {
   const calculatedMins = flags.completedGeneralOvertime ?? flags.completedOvertime ?? 0;
   const generalMins = resolveGeneralOvertimeMinutes(attendance, calculatedMins);
   attendance.generalOvertimeMinutes = generalMins;
+  attendance.rawOvertimeSurplusMinutes = generalMins;
 
   // Mirror to legacy overtimeRequest only when new OT is calculated — never clear existing legacy data
   if (calculatedMins > 0 && flags.extraTime) {

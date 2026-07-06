@@ -6,7 +6,8 @@ import connectDB from './config/database.js';
 import cron from 'node-cron';
 import Attendance from './models/Attendance.js';
 import LeaveRequest from './models/LeaveRequest.js';
-import { getFlags } from './utils/attendanceUtils.js';
+import { getFlags, resolveLatePenaltyStartTime } from './utils/attendanceUtils.js';
+import SystemSettings from './models/SystemSettings.js';
 
 // Import routes
 import authRoutes from './routes/authRoutes.js';
@@ -204,6 +205,8 @@ app.listen(PORT, async () => {
     console.log('Running 11 PM auto-checkout job...');
     try {
       const today = new Date().toISOString().split('T')[0];
+      const systemSettings = await SystemSettings.getSettings();
+      const latePenaltyStartTime = resolveLatePenaltyStartTime(systemSettings);
 
       // Find all attendance records for today that are checked in but NOT checked out
       const attendances = await Attendance.find({
@@ -274,7 +277,7 @@ app.listen(PORT, async () => {
           }
 
           const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, !!(await CompanyHoliday.findOne({ date: record.date })), record.checkIn, record.isPenaltyDisabled, approvedOT);
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, !!(await CompanyHoliday.findOne({ date: record.date })), record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, latePenaltyStartTime);
 
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;

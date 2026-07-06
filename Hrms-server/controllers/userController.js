@@ -2,7 +2,8 @@ import User from '../models/User.js';
 import Attendance from '../models/Attendance.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
-import { calculateWorkedSeconds, getFlags } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, resolveLatePenaltyStartTime } from '../utils/attendanceUtils.js';
+import SystemSettings from '../models/SystemSettings.js';
 import { logAction } from './auditController.js';
 
 export const getAllUsers = async (req, res) => {
@@ -618,6 +619,8 @@ export const getEmployeeStats = async (req, res) => {
     // Fetch all holidays once
     const holidays = await CompanyHoliday.find({}).lean();
     const holidayDates = new Set(holidays.map(h => h.date));
+    const systemSettings = await SystemSettings.getSettings();
+    const latePenaltyStartTime = resolveLatePenaltyStartTime(systemSettings);
 
     const stats = await Promise.all(employees.map(async (employee) => {
       const records = await Attendance.find({ userId: employee._id });
@@ -643,7 +646,7 @@ export const getEmployeeStats = async (req, res) => {
           }
 
           const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT);
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, latePenaltyStartTime);
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;
           record.totalWorkedSeconds = worked;
