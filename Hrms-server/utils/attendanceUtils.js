@@ -48,27 +48,25 @@ export const resolveLatePenaltyStartTime = (settings) =>
 /**
  * Returns true if checkInTime is after the configured penalty start time (default 09:00:00).
  */
-export const isLateCheckIn = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME) => {
+export const isLateCheckIn = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME, timeZone = 'Asia/Kolkata') => {
   if (!checkInTime) return false;
-  const d = new Date(checkInTime);
+  const { hour, minute } = getWallClockHM(new Date(checkInTime), timeZone);
   const { hour: cutoffH, minute: cutoffM } = parseCheckInTime(latePenaltyStartTime);
-  const checkInSecs = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+  const checkInSecs = hour * 3600 + minute * 60;
   const cutoffSecs = cutoffH * 3600 + cutoffM * 60;
   return checkInSecs > cutoffSecs;
 };
 
 /**
- * Seconds late relative to the configured penalty start time (default 09:00 AM).
+ * Seconds late relative to the configured penalty start time (default 09:00 AM), in company timezone.
  */
-export const calculateLatenessSeconds = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME) => {
+export const calculateLatenessSeconds = (checkInTime, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME, timeZone = 'Asia/Kolkata') => {
   if (!checkInTime) return 0;
-  const d = new Date(checkInTime);
+  const { hour, minute } = getWallClockHM(new Date(checkInTime), timeZone);
   const { hour: cutoffH, minute: cutoffM } = parseCheckInTime(latePenaltyStartTime);
-  const cutoff = new Date(checkInTime);
-  cutoff.setHours(cutoffH, cutoffM, 0, 0);
-
-  const diff = d.getTime() - cutoff.getTime();
-  return Math.max(0, Math.floor(diff / 1000));
+  const checkInSecs = hour * 3600 + minute * 60;
+  const cutoffSecs = cutoffH * 3600 + cutoffM * 60;
+  return Math.max(0, checkInSecs - cutoffSecs);
 };
 
 export const calculateDurationSeconds = (start, end) => {
@@ -124,7 +122,7 @@ export const calculateWorkedSeconds = (attendance, checkOutTime) => {
  * @param {boolean} isEarlyReleaseDay - Admin set per-day checkout override; no low time for that day
  * @returns {{ lowTime: boolean, extraTime: boolean, lateCheckIn: boolean, penaltySeconds: number, completedOvertime: number, unfulfilledOvertime: number }}
  */
-export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0, dateStr = null, isEarlyReleaseDay = false, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME) => {
+export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes = 0, isHolidayWork = false, checkInTime = null, isPenaltyDisabled = false, approvedOvertimeMinutes = 0, dateStr = null, isEarlyReleaseDay = false, latePenaltyStartTime = DEFAULT_LATE_PENALTY_START_TIME, timeZone = 'Asia/Kolkata') => {
   // Holiday rule: if employee works on a holiday, entire duration is overtime, no penalty
   if (isHolidayWork) {
     const holidayMins = Math.floor(workedSeconds / 60);
@@ -141,20 +139,15 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
 
   // Late check-in penalty: deduct 15 minutes from effective worked time
   // ONLY apply penalty if date is on or after PENALTY_EFFECTIVE_DATE AND penalties are not disabled
-  const late = isLateCheckIn(checkInTime, latePenaltyStartTime);
+  const late = isLateCheckIn(checkInTime, latePenaltyStartTime, timeZone);
   let penaltySeconds = 0;
 
   // Half-day leave: no late check-in penalty for that date (low-time uses halved thresholds separately)
   if (late && checkInTime && !isPenaltyDisabled && !isHalfDayApproved) {
-    const d = new Date(checkInTime);
-    // Format to YYYY-MM-DD for comparison
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    const checkInDateStr = `${year}-${month}-${day}`;
+    const checkInDateStr = getDateStrInTimezone(new Date(checkInTime), timeZone);
 
     if (checkInDateStr >= PENALTY_EFFECTIVE_DATE) {
-      const actualLatenessSeconds = calculateLatenessSeconds(checkInTime, latePenaltyStartTime);
+      const actualLatenessSeconds = calculateLatenessSeconds(checkInTime, latePenaltyStartTime, timeZone);
       // Penalty is MIN_LATE_PENALTY_SECONDS (15 mins) OR actual lateness, whichever is greater
       penaltySeconds = Math.max(MIN_LATE_PENALTY_SECONDS, actualLatenessSeconds);
     }
