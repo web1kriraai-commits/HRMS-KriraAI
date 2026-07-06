@@ -24,7 +24,10 @@ import {
   getPendingEarlyOvertimeRequests,
   submitOvertimeRequest,
   getPendingOvertimeRequests,
-  reviewOvertimeRequest
+  reviewOvertimeRequest,
+  submitEarlyOvertimeRepaymentRequest,
+  getPendingEarlyOvertimeRepaymentRequests,
+  reviewEarlyOvertimeRepayment
 } from '../controllers/attendanceController.js';
 
 const router = express.Router();
@@ -43,6 +46,7 @@ router.get('/history', getAttendanceHistory);
 router.post('/request-early-checkout', requestEarlyCheckout);
 router.post('/request-early-overtime', submitEarlyOvertimeRequest);
 router.post('/request-overtime', submitOvertimeRequest);
+router.post('/request-early-ot-repayment', submitEarlyOvertimeRepaymentRequest);
 
 // Admin/HR routes
 router.get('/all', authorize('HR', 'Admin'), getAllAttendance);
@@ -57,6 +61,8 @@ router.post('/admin/review-early-checkout/:recordId', authorize('HR', 'Admin'), 
 router.get('/admin/pending-early-overtime', authorize('HR', 'Admin'), getPendingEarlyOvertimeRequests);
 router.get('/admin/pending-overtime', authorize('HR', 'Admin'), getPendingOvertimeRequests);
 router.post('/admin/review-overtime/:recordId', authorize('HR', 'Admin'), reviewOvertimeRequest);
+router.get('/admin/pending-early-ot-repayment', authorize('HR', 'Admin'), getPendingEarlyOvertimeRepaymentRequests);
+router.post('/admin/review-early-ot-repayment/:recordId', authorize('HR', 'Admin'), reviewEarlyOvertimeRepayment);
 router.put('/:recordId', authorize('HR', 'Admin'), adminUpdateAttendance);
 router.delete('/:recordId', authorize('Admin'), deleteAttendance);
 

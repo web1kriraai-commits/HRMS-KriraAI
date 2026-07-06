@@ -19,7 +19,8 @@ const settingsToJson = (settings) => ({
   defaultCheckInTime: settings.defaultCheckInTime || '08:30',
   checkInTimeOverrides: normalizeOverridesToObject(settings.checkInTimeOverrides),
   defaultCheckoutTime: settings.defaultCheckoutTime || '17:30',
-  checkoutTimeOverrides: normalizeOverridesToObject(settings.checkoutTimeOverrides)
+  checkoutTimeOverrides: normalizeOverridesToObject(settings.checkoutTimeOverrides),
+  latePenaltyStartTime: settings.latePenaltyStartTime || '09:00'
 });
 
 export const getSettings = async (req, res) => {
@@ -41,7 +42,8 @@ export const updateSettings = async (req, res) => {
       removeCheckInOverrideDate,
       defaultCheckoutTime,
       setCheckoutOverride,
-      removeCheckoutOverrideDate
+      removeCheckoutOverrideDate,
+      latePenaltyStartTime
     } = req.body;
 
     let settings = await SystemSettings.findOne();
@@ -81,6 +83,11 @@ export const updateSettings = async (req, res) => {
     if (defaultCheckoutTime !== undefined) {
       parseCheckoutTime(defaultCheckoutTime);
       settings.defaultCheckoutTime = defaultCheckoutTime;
+    }
+
+    if (latePenaltyStartTime !== undefined) {
+      parseCheckInTime(latePenaltyStartTime);
+      settings.latePenaltyStartTime = latePenaltyStartTime;
     }
 
     let recalcDate = null;
