@@ -145,6 +145,8 @@ const attendanceSchema = new mongoose.Schema({
     approvedAt: { type: Date },
     deficitMinutes: { type: Number, default: 0 },
     coveredMinutes: { type: Number, default: 0 },
+    /** Minutes worked above minimum shift, credited on approved early-checkout when surplus exists */
+    completedMinutes: { type: Number, default: 0 },
     status: {
       type: String,
       enum: ['None', 'Pending', 'Partial', 'Covered'],

@@ -299,6 +299,16 @@ export const recalculateOvertimeBuckets = (attendance, sameMonthDeficitRecords =
 
   const remainingAfterMgmt = rawGeneralMinutes - mgmtMinutes;
 
+  const earlyCheckoutApproved =
+    attendance.earlyLogoutRequest === 'Approved' ||
+    attendance.earlyOvertime?.requestStatus === 'Approved';
+  const earlyCheckoutCompleted = earlyCheckoutApproved
+    ? (attendance.earlyOvertime?.completedMinutes || 0)
+    : 0;
+  const earlySurplusMinutes = Math.min(earlyCheckoutCompleted, remainingAfterMgmt);
+
+  const remainingAfterEarly = remainingAfterMgmt - earlySurplusMinutes;
+
   const repaymentApproved = attendance.earlyOvertimeRepayment?.status === 'Approved';
   const requestedRepaymentMinutes = repaymentApproved
     ? (attendance.earlyOvertimeRepayment.requestedMinutes || 0)
@@ -310,7 +320,7 @@ export const recalculateOvertimeBuckets = (attendance, sameMonthDeficitRecords =
   }, 0);
 
   const repaymentMinutes = repaymentApproved
-    ? Math.min(requestedRepaymentMinutes, remainingAfterMgmt, outstandingDeficitInMonth)
+    ? Math.min(requestedRepaymentMinutes, remainingAfterEarly, outstandingDeficitInMonth)
     : 0;
 
   if (attendance.earlyOvertimeRepayment) {
@@ -321,7 +331,7 @@ export const recalculateOvertimeBuckets = (attendance, sameMonthDeficitRecords =
     allocateEarlyOvertimeCoverage(sameMonthDeficitRecords, repaymentMinutes);
   }
 
-  const finalGeneralMinutes = Math.max(0, remainingAfterMgmt - repaymentMinutes);
+  const finalGeneralMinutes = Math.max(0, remainingAfterEarly - repaymentMinutes);
   attendance.generalOvertimeMinutes = finalGeneralMinutes;
   attendance.rawOvertimeSurplusMinutes = rawGeneralMinutes;
 
@@ -329,9 +339,15 @@ export const recalculateOvertimeBuckets = (attendance, sameMonthDeficitRecords =
   attendance.extraTimeFlag =
     finalGeneralMinutes > 0 ||
     legacyGeneral > 0 ||
-    mgmtMinutes > 0;
+    mgmtMinutes > 0 ||
+    earlySurplusMinutes > 0;
 
-  return { mgmtMinutes, repaymentMinutes, generalOvertimeMinutes: finalGeneralMinutes };
+  return {
+    mgmtMinutes,
+    earlySurplusMinutes,
+    repaymentMinutes,
+    generalOvertimeMinutes: finalGeneralMinutes
+  };
 };
 
 /** Read general OT from legacy overtimeRequest without losing historical values. */
@@ -416,8 +432,11 @@ export const hydrateAttendanceOvertimeFields = (attendance) => {
   const hasMgmt =
     doc.managementOvertime?.status === 'Approved' &&
     (doc.managementOvertime?.completedMinutes || 0) > 0;
+  const hasEarlySurplus =
+    (doc.earlyLogoutRequest === 'Approved' || doc.earlyOvertime?.requestStatus === 'Approved') &&
+    (doc.earlyOvertime?.completedMinutes || 0) > 0;
 
-  if (hasGeneral || hasMgmt) {
+  if (hasGeneral || hasMgmt || hasEarlySurplus) {
     doc.extraTimeFlag = true;
   }
 

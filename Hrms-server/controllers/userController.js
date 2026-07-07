@@ -316,7 +316,8 @@ export const updateUser = async (req, res) => {
       manualPaidLeaveAdjustment, manualExtraTimeAdjustment, 
       manualUnpaidLeaveAdjustment, manualHalfDayLeaveAdjustment, 
       joiningDate, bonds, aadhaarNumber, guardianName, 
-      mobileNumber, guardianMobileNumber, salaryBreakdown, password,
+      mobileNumber, guardianMobileNumber, bankName, bankAccountHolderName,
+      bankAccountNumber, bankIfscCode, salaryBreakdown, password,
       lastForwardedMonth, forwardedMonths, forwardedInMonths,
       paidLeaveAccess
     } = req.body;
@@ -397,6 +398,38 @@ export const updateUser = async (req, res) => {
     // Update guardian mobile number if provided
     if (guardianMobileNumber !== undefined) {
       user.guardianMobileNumber = guardianMobileNumber.trim() || undefined;
+    }
+
+    // Update bank details if provided
+    if (bankName !== undefined) {
+      user.bankName = String(bankName).trim() || undefined;
+    }
+    if (bankAccountHolderName !== undefined) {
+      user.bankAccountHolderName = String(bankAccountHolderName).trim() || undefined;
+    }
+    if (bankAccountNumber !== undefined) {
+      const trimmedAccountNumber = String(bankAccountNumber).trim();
+      if (trimmedAccountNumber) {
+        const normalizedAccountNumber = trimmedAccountNumber.replace(/\D/g, '');
+        if (!/^\d{9,18}$/.test(normalizedAccountNumber)) {
+          return res.status(400).json({ message: 'Account number must be 9 to 18 digits' });
+        }
+        user.bankAccountNumber = normalizedAccountNumber;
+      } else {
+        user.bankAccountNumber = undefined;
+      }
+    }
+    if (bankIfscCode !== undefined) {
+      const trimmedIfscCode = String(bankIfscCode).trim();
+      if (trimmedIfscCode) {
+        const normalizedIfscCode = trimmedIfscCode.toUpperCase();
+        if (normalizedIfscCode.length !== 11) {
+          return res.status(400).json({ message: 'IFSC code must be exactly 11 characters' });
+        }
+        user.bankIfscCode = normalizedIfscCode;
+      } else {
+        user.bankIfscCode = undefined;
+      }
     }
 
     if (paidLeaveAccess !== undefined) {

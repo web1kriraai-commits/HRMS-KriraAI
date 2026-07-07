@@ -3,7 +3,7 @@ import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
 import SystemSettings from '../models/SystemSettings.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, recalculateOvertimeBuckets, getMonthKey, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields, resolveLatePenaltyStartTime } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, recalculateOvertimeBuckets, getMonthKey, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields, resolveLatePenaltyStartTime, calculateEarlyOvertimeDeficit, syncEarlyOvertimeStatus } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
 /** Ensure API responses include new OT fields without stripping legacy data. */
@@ -62,6 +62,117 @@ const getOutstandingDeficitMinutesInMonth = (records) =>
     const eo = r.earlyOvertime || {};
     return sum + Math.max(0, (eo.deficitMinutes || 0) - (eo.coveredMinutes || 0));
   }, 0);
+
+/** Live worked-time snapshot for OT approval (uses checkout time when present, otherwise now). */
+const getAttendanceOvertimeSnapshot = async (attendance, workedOverride = null) => {
+  const userId = attendance.userId?._id || attendance.userId;
+  const date = attendance.date;
+  const isHoliday = await checkIsHoliday(date);
+  const settings = await SystemSettings.getSettings();
+  const tz = settings?.timezone || 'Asia/Kolkata';
+  const hasHalfDay = await LeaveRequest.findOne({
+    userId,
+    startDate: date,
+    category: 'Half Day Leave',
+    status: 'Approved'
+  });
+
+  let extraTimeLeaveMinutes = 0;
+  const extraTimeLeave = await LeaveRequest.findOne({
+    userId,
+    startDate: date,
+    category: 'Extra Time Leave',
+    status: 'Approved'
+  });
+  if (extraTimeLeave?.startTime && extraTimeLeave?.endTime) {
+    const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
+    const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
+    extraTimeLeaveMinutes = Math.max(0, (endH * 60 + endM) - (startH * 60 + startM));
+  }
+
+  const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, date);
+  const endIso = workedOverride != null
+    ? null
+    : (attendance.checkOut ? attendance.checkOut.toISOString() : new Date().toISOString());
+  const worked = workedOverride != null
+    ? workedOverride
+    : calculateWorkedSeconds(attendance, endIso);
+  const flags = getFlags(
+    worked,
+    !!hasHalfDay,
+    extraTimeLeaveMinutes,
+    isHoliday,
+    attendance.checkIn,
+    attendance.isPenaltyDisabled,
+    0,
+    date,
+    isEarlyReleaseDay,
+    resolveLatePenaltyStartTime(settings, date),
+    tz
+  );
+  const workedMinutes =
+    Math.floor(Math.max(0, worked - (flags.penaltySeconds || 0)) / 60) +
+    extraTimeLeaveMinutes;
+
+  return {
+    worked,
+    flags,
+    surplusMinutes: flags.completedGeneralOvertime ?? 0,
+    workedMinutes,
+    hasHalfDay: !!hasHalfDay,
+    extraTimeLeaveMinutes,
+    isHoliday,
+    isEarlyReleaseDay
+  };
+};
+
+const applyApprovedManagementOvertimeMinutes = (attendance, surplusMinutes) => {
+  if (attendance.managementOvertime?.status !== 'Approved') return;
+  const mins = Math.max(0, surplusMinutes);
+  attendance.managementOvertime.completedMinutes = mins;
+  attendance.managementOvertime.durationMinutes = mins;
+};
+
+const applyApprovedEarlyCheckoutOvertime = (attendance, snapshot) => {
+  const earlyApproved =
+    attendance.earlyLogoutRequest === 'Approved' ||
+    attendance.earlyOvertime?.requestStatus === 'Approved';
+  if (!earlyApproved) return;
+
+  if (!attendance.earlyOvertime) {
+    attendance.earlyOvertime = { deficitMinutes: 0, coveredMinutes: 0, status: 'None' };
+  }
+
+  const { surplusMinutes, workedMinutes, hasHalfDay } = snapshot;
+  if (surplusMinutes > 0) {
+    attendance.earlyOvertime.completedMinutes = surplusMinutes;
+    attendance.earlyOvertime.deficitMinutes = 0;
+    attendance.earlyOvertime.status = 'None';
+    return;
+  }
+
+  attendance.earlyOvertime.completedMinutes = 0;
+  if (attendance.checkOut) {
+    const deficit = calculateEarlyOvertimeDeficit(workedMinutes, hasHalfDay, true);
+    attendance.earlyOvertime.deficitMinutes = deficit;
+    syncEarlyOvertimeStatus(attendance);
+  }
+};
+
+const finalizeOvertimeBuckets = async (attendance, snapshot) => {
+  applyFlagsToAttendance(attendance, snapshot.flags, snapshot.worked, {
+    isHalfDayApproved: snapshot.hasHalfDay,
+    earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
+    extraTimeLeaveMinutes: snapshot.extraTimeLeaveMinutes
+  });
+  applyApprovedManagementOvertimeMinutes(attendance, snapshot.surplusMinutes);
+  applyApprovedEarlyCheckoutOvertime(attendance, snapshot);
+
+  const userId = attendance.userId?._id || attendance.userId;
+  const sameMonthDeficitRecords = await getSameMonthDeficitRecords(userId, attendance.date, attendance._id);
+  recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
+  return sameMonthDeficitRecords;
+};
 
 export const clockIn = async (req, res) => {
   try {
@@ -271,6 +382,10 @@ export const clockOut = async (req, res) => {
       earlyLogoutApproved: attendance.earlyLogoutRequest === 'Approved',
       extraTimeLeaveMinutes
     });
+
+    const snapshot = await getAttendanceOvertimeSnapshot(attendance, worked);
+    applyApprovedManagementOvertimeMinutes(attendance, snapshot.surplusMinutes);
+    applyApprovedEarlyCheckoutOvertime(attendance, snapshot);
 
     // Redistribute today's OT-eligible surplus across Management OT / approved Early OT
     // repayment BEFORE counting the remainder as General OT (no double counting).
@@ -1681,6 +1796,8 @@ export const reviewEarlyCheckout = async (req, res) => {
     if (status === 'Approved') {
       attendance.earlyOvertime.approvedBy = req.user._id;
       attendance.earlyOvertime.approvedAt = new Date();
+    } else if (status === 'Rejected') {
+      attendance.earlyOvertime.completedMinutes = 0;
     }
     if (adminNote) {
       attendance.earlyLogoutRequestNote = `${attendance.earlyLogoutRequestNote || ''} | Reviewer: ${adminNote}`;
@@ -1689,32 +1806,12 @@ export const reviewEarlyCheckout = async (req, res) => {
       }
     }
 
-    // Recalculate early OT if already checked out
-    if (status === 'Approved' && attendance.checkIn && attendance.checkOut) {
-      const hasHalfDay = await LeaveRequest.findOne({
-        userId: attendance.userId,
-        startDate: attendance.date,
-        category: 'Half Day Leave',
-        status: 'Approved'
-      });
-      const worked = calculateWorkedSeconds(attendance, attendance.checkOut.toISOString());
-      const settings = await SystemSettings.getSettings();
-      const flags = getFlags(
-        worked,
-        !!hasHalfDay,
-        0,
-        false,
-        attendance.checkIn,
-        attendance.isPenaltyDisabled,
-        0,
-        attendance.date,
-        hasCheckoutOverrideForDate(settings, attendance.date),
-        resolveLatePenaltyStartTime(settings, attendance.date), settings?.timezone || 'Asia/Kolkata'
-      );
-      applyFlagsToAttendance(attendance, flags, worked, {
-        isHalfDayApproved: !!hasHalfDay,
-        earlyLogoutApproved: true
-      });
+    if (status === 'Approved') {
+      const snapshot = await getAttendanceOvertimeSnapshot(attendance);
+      const sameMonthDeficitRecords = await finalizeOvertimeBuckets(attendance, snapshot);
+      if (sameMonthDeficitRecords.length > 0) {
+        await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+      }
     }
     
     await attendance.save();
@@ -1836,9 +1933,6 @@ export const submitOvertimeRequest = async (req, res) => {
     if (!reason?.trim()) {
       return res.status(400).json({ message: 'Reason is required for management overtime' });
     }
-    if (!durationMinutes || durationMinutes <= 0) {
-      return res.status(400).json({ message: 'Duration must be greater than 0 minutes' });
-    }
 
     const attendance = await Attendance.findOne({ userId, date: targetDate });
     if (!attendance || !attendance.checkIn) {
@@ -1856,7 +1950,7 @@ export const submitOvertimeRequest = async (req, res) => {
 
     attendance.managementOvertime = {
       reason: reason.trim(),
-      durationMinutes: Math.floor(durationMinutes),
+      durationMinutes: 0,
       status: 'Pending',
       requestedAt: new Date(),
       completedMinutes: 0
@@ -1869,7 +1963,7 @@ export const submitOvertimeRequest = async (req, res) => {
       'REQUEST_MANAGEMENT_OVERTIME',
       'ATTENDANCE',
       attendance._id.toString(),
-      `Requested ${durationMinutes}m management OT: ${reason.trim()}`
+      `Requested management OT: ${reason.trim()}`
     );
 
     res.json(toAttendanceResponse(attendance));
@@ -1911,26 +2005,20 @@ export const reviewOvertimeRequest = async (req, res) => {
 
     attendance.managementOvertime.status = status;
     if (status === 'Approved') {
-      attendance.managementOvertime.completedMinutes = attendance.managementOvertime.durationMinutes;
       attendance.managementOvertime.approvedBy = req.user._id;
       attendance.managementOvertime.approvedAt = new Date();
-      attendance.extraTimeFlag = true;
+      const snapshot = await getAttendanceOvertimeSnapshot(attendance);
+      const sameMonthDeficitRecords = await finalizeOvertimeBuckets(attendance, snapshot);
+      if (sameMonthDeficitRecords.length > 0) {
+        await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+      }
     } else {
       attendance.managementOvertime.completedMinutes = 0;
+      attendance.managementOvertime.durationMinutes = 0;
     }
 
     if (adminNote?.trim()) {
       attendance.managementOvertime.reason = `${attendance.managementOvertime.reason} | Reviewer: ${adminNote.trim()}`;
-    }
-
-    // Management OT minutes must not also be counted as General OT — recompute the buckets
-    // if the shift is already complete (either checked out, or already past minimum shift).
-    if (attendance.checkOut) {
-      const sameMonthDeficitRecords = await getSameMonthDeficitRecords(attendance.userId._id || attendance.userId, attendance.date, attendance._id);
-      recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
-      if (sameMonthDeficitRecords.length > 0) {
-        await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
-      }
     }
 
     await attendance.save();
