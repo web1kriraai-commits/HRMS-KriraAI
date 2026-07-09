@@ -27,8 +27,8 @@ router.post('/auto-add-sundays', authenticate, authorize('HR', 'Admin'), async (
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
-router.put('/:id', authenticate, authorize('Admin'), updateHoliday);
-router.delete('/:id', authenticate, authorize('Admin'), deleteHoliday);
+router.put('/:id', authenticate, authorize('HR', 'Admin'), updateHoliday);
+router.delete('/:id', authenticate, authorize('HR', 'Admin'), deleteHoliday);
 
 export default router;
 

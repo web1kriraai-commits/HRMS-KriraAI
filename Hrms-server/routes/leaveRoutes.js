@@ -25,8 +25,8 @@ router.get('/user/:userId', getLeavesByUserId);
 router.get('/all', authorize('HR', 'Admin'), getAllLeaves);
 router.get('/pending', authorize('HR', 'Admin'), getPendingLeaves);
 router.put('/:id/status', authorize('HR', 'Admin'), updateLeaveStatus);
-router.put('/:id', authorize('Admin'), adminUpdateLeave);
-router.delete('/:id', authorize('Admin'), deleteLeave);
+router.put('/:id', authorize('HR', 'Admin'), adminUpdateLeave);
+router.delete('/:id', authorize('HR', 'Admin'), deleteLeave);
 
 export default router;
 

@@ -8,7 +8,7 @@ import {
 const router = express.Router();
 
 router.get('/', authenticate, getSettings);
-router.put('/', authenticate, authorize('Admin'), updateSettings);
+router.put('/', authenticate, authorize('HR', 'Admin'), updateSettings);
 
 export default router;
 
