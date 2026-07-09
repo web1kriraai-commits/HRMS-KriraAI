@@ -3,7 +3,7 @@ import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
 import SystemSettings from '../models/SystemSettings.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, recalculateOvertimeBuckets, getMonthKey, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields, resolveLatePenaltyStartTime, calculateEarlyOvertimeDeficit, syncEarlyOvertimeStatus } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, recalculateOvertimeBuckets, getMonthKey, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields, resolveLatePenaltyStartTime, calculateEarlyOvertimeDeficit, syncEarlyOvertimeStatus, AUTO_CHECKOUT_HOUR, AUTO_CHECKOUT_MINUTE, buildWallClockDateTime } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
 /** Ensure API responses include new OT fields without stripping legacy data. */
@@ -172,6 +172,76 @@ const finalizeOvertimeBuckets = async (attendance, snapshot) => {
   const sameMonthDeficitRecords = await getSameMonthDeficitRecords(userId, attendance.date, attendance._id);
   recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
   return sameMonthDeficitRecords;
+};
+
+/**
+ * Auto-checkout all open attendance sessions at 10:00 PM (company timezone).
+ * Closes any active break and finalizes worked time / OT flags like a normal checkout.
+ */
+export const runAutoCheckoutJob = async () => {
+  const settings = await SystemSettings.getSettings();
+  const tz = settings?.timezone || 'Asia/Kolkata';
+  const today = getDateStrInTimezone(new Date(), tz);
+
+  const attendances = await Attendance.find({
+    date: today,
+    checkIn: { $exists: true, $ne: null },
+    $or: [{ checkOut: null }, { checkOut: { $exists: false } }]
+  });
+
+  const checkoutAt = buildWallClockDateTime(
+    today,
+    AUTO_CHECKOUT_HOUR,
+    AUTO_CHECKOUT_MINUTE,
+    tz
+  );
+
+  let processed = 0;
+  const total = attendances.length;
+
+  console.log(`[Auto-checkout] Starting for ${today} at 10:00 PM (${tz}) — ${total} open session(s)`);
+
+  for (let index = 0; index < attendances.length; index++) {
+    const attendance = attendances[index];
+    const checkInTime = new Date(attendance.checkIn).getTime();
+
+    if (checkInTime >= checkoutAt.getTime()) {
+      console.log(
+        `[Auto-checkout] [${index + 1}/${total}] Skip user ${attendance.userId} — check-in after 10:00 PM`
+      );
+      continue;
+    }
+
+    for (const breakEntry of attendance.breaks || []) {
+      if (breakEntry.start && !breakEntry.end) {
+        breakEntry.end = checkoutAt;
+        breakEntry.durationSeconds = Math.max(
+          0,
+          Math.floor(
+            (checkoutAt.getTime() - new Date(breakEntry.start).getTime()) / 1000
+          )
+        );
+      }
+    }
+
+    attendance.checkOut = checkoutAt;
+    const worked = calculateWorkedSeconds(attendance, checkoutAt.toISOString());
+    const snapshot = await getAttendanceOvertimeSnapshot(attendance, worked);
+    const sameMonthRecords = await finalizeOvertimeBuckets(attendance, snapshot);
+    await attendance.save();
+    if (sameMonthRecords.length > 0) {
+      await Promise.all(sameMonthRecords.map((record) => record.save()));
+    }
+
+    processed += 1;
+    const pct = total > 0 ? Math.round(((index + 1) / total) * 100) : 100;
+    console.log(
+      `[Auto-checkout] [${index + 1}/${total}] (${pct}%) User ${attendance.userId} checked out at 10:00 PM — worked ${worked}s`
+    );
+  }
+
+  console.log(`[Auto-checkout] Done — processed ${processed}/${total} session(s) for ${today}`);
+  return { date: today, total, processed, checkoutAt: checkoutAt.toISOString() };
 };
 
 export const clockIn = async (req, res) => {

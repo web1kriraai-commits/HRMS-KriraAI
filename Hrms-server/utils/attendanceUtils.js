@@ -637,3 +637,51 @@ export const isWorkedSecondsSufficientForCheckout = (
   const min = hasHalfDayLeave ? HALF_DAY_MIN_SHIFT_SECONDS : FULL_DAY_MIN_SHIFT_SECONDS;
   return workedSeconds >= min;
 };
+
+/** Default auto-checkout wall-clock time when employee has not checked out. */
+export const AUTO_CHECKOUT_HOUR = 22;
+export const AUTO_CHECKOUT_MINUTE = 0;
+
+/**
+ * Build a UTC Date for a wall-clock time on YYYY-MM-DD in the company timezone.
+ */
+export const buildWallClockDateTime = (
+  dateStr,
+  hour,
+  minute,
+  timeZone = 'Asia/Kolkata'
+) => {
+  const targetDate = String(dateStr).slice(0, 10);
+  let low =
+    Date.UTC(
+      parseInt(targetDate.slice(0, 4), 10),
+      parseInt(targetDate.slice(5, 7), 10) - 1,
+      parseInt(targetDate.slice(8, 10), 10),
+      0,
+      0,
+      0
+    ) -
+    14 * 3600000;
+  let high = low + 48 * 3600000;
+
+  for (let i = 0; i < 48; i++) {
+    const mid = Math.floor((low + high) / 2);
+    const d = getDateStrInTimezone(new Date(mid), timeZone);
+    const { hour: h, minute: m } = getWallClockHM(new Date(mid), timeZone);
+    const afterTarget =
+      d > targetDate ||
+      (d === targetDate && (h > hour || (h === hour && m > minute)));
+    if (d === targetDate && h === hour && m === minute) {
+      return new Date(mid);
+    }
+    if (afterTarget) {
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+
+  const fallback = new Date(`${targetDate}T00:00:00`);
+  fallback.setHours(hour, minute, 0, 0);
+  return fallback;
+};
