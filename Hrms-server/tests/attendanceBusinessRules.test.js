@@ -1,4 +1,4 @@
-import { getFlags, calculateWorkedSeconds, MIN_LATE_PENALTY_SECONDS } from '../utils/attendanceUtils.js';
+import { getFlags, calculateWorkedSeconds } from '../utils/attendanceUtils.js';
 
 const colors = {
     reset: "\x1b[0m",
@@ -78,26 +78,66 @@ runTest("Break Deduction Accuracy", () => {
         `Expected ${expected}s worked, got ${workedSeconds}s`);
 });
 
-// Scenario 5: Dynamic Penalty - 12 mins late (9:12 AM) -> 15 mins penalty
-runTest("Late 12m -> 15m Penalty", () => {
+// Scenario 5: Buffer window — 12 mins late (9:12 vs 09:00) -> flat 15 mins penalty
+runTest("Late 12m -> 15m Penalty (buffer)", () => {
     const checkIn = "2026-03-01T09:12:00";
     const workedSeconds = 500 * 60; // 8h 20m gross
-    const flags = getFlags(workedSeconds, false, 0, false, checkIn);
+    const flags = getFlags(workedSeconds, false, 0, false, checkIn, false, 0, null, false, '09:00');
 
     // effective = 500 - 15 = 485 mins (which is < 495, so lowTime should be true)
     return assert(flags.penaltySeconds === 900 && flags.lowTime === true,
         `Expected 900s penalty & lowTime:true, got penalty:${flags.penaltySeconds}, lowTime:${flags.lowTime}`);
 });
 
-// Scenario 6: Dynamic Penalty - 72 mins late (10:12 AM) -> 72 mins penalty
+// Scenario 6: Dynamic Penalty - 72 mins late (10:12 AM vs 09:00) -> 72 mins penalty
 runTest("Late 72m -> 72m Penalty", () => {
     const checkIn = "2026-03-01T10:12:00";
     const workedSeconds = 600 * 60; // 10h gross
-    const flags = getFlags(workedSeconds, false, 0, false, checkIn);
+    const flags = getFlags(workedSeconds, false, 0, false, checkIn, false, 0, null, false, '09:00');
 
     const expectedPenalty = 72 * 60;
     return assert(flags.penaltySeconds === expectedPenalty,
         `Expected ${expectedPenalty}s penalty, got ${flags.penaltySeconds}s`);
+});
+
+// Scenario 6b: 2 mins late (09:07 vs 09:05) -> flat 15m (buffer 09:05–09:15)
+runTest("Late 2m after 09:05 -> 15m Penalty (buffer)", () => {
+    const checkIn = "2026-07-14T09:07:00";
+    const workedSeconds = 500 * 60;
+    const flags = getFlags(workedSeconds, false, 0, false, checkIn, false, 0, '2026-07-14', false, '09:05');
+
+    return assert(flags.penaltySeconds === 15 * 60 && flags.lateCheckIn === true,
+        `Expected 900s penalty, got penalty:${flags.penaltySeconds}, late:${flags.lateCheckIn}`);
+});
+
+// Scenario 6c: 20 mins late (09:25 vs 09:05) -> 20 mins
+runTest("Late 20m after 09:05 -> 20m Penalty", () => {
+    const checkIn = "2026-07-14T09:25:00";
+    const workedSeconds = 500 * 60;
+    const flags = getFlags(workedSeconds, false, 0, false, checkIn, false, 0, '2026-07-14', false, '09:05');
+
+    return assert(flags.penaltySeconds === 20 * 60,
+        `Expected 1200s penalty, got ${flags.penaltySeconds}s`);
+});
+
+// Scenario 6d: 25 mins late (09:30 vs 09:05) -> 25 mins
+runTest("Late 25m after 09:05 -> 25m Penalty", () => {
+    const checkIn = "2026-07-14T09:30:00";
+    const workedSeconds = 500 * 60;
+    const flags = getFlags(workedSeconds, false, 0, false, checkIn, false, 0, '2026-07-14', false, '09:05');
+
+    return assert(flags.penaltySeconds === 25 * 60,
+        `Expected 1500s penalty, got ${flags.penaltySeconds}s`);
+});
+
+// Scenario 6e: 26 mins late (09:31 vs 09:05) -> 26 mins
+runTest("Late 26m after 09:05 -> 26m Penalty", () => {
+    const checkIn = "2026-07-14T09:31:00";
+    const workedSeconds = 500 * 60;
+    const flags = getFlags(workedSeconds, false, 0, false, checkIn, false, 0, '2026-07-14', false, '09:05');
+
+    return assert(flags.penaltySeconds === 26 * 60,
+        `Expected 1560s penalty, got ${flags.penaltySeconds}s`);
 });
 
 // Scenario 7: Extra Time Half Day Leave (+4.125h compensation)

@@ -1,6 +1,6 @@
 import SystemSettings from '../models/SystemSettings.js';
 import { logAction } from './auditController.js';
-import { parseCheckoutTime, parseCheckInTime } from '../utils/attendanceUtils.js';
+import { parseCheckoutTime, parseCheckInTime, getTodayStr } from '../utils/attendanceUtils.js';
 import { recalculateAttendanceFlagsForDate } from './attendanceController.js';
 
 const normalizeOverridesToObject = (overrides) => {
@@ -85,12 +85,13 @@ export const updateSettings = async (req, res) => {
       settings.defaultCheckoutTime = defaultCheckoutTime;
     }
 
+    let recalcDate = null;
+
     if (latePenaltyStartTime !== undefined) {
       parseCheckInTime(latePenaltyStartTime);
       settings.latePenaltyStartTime = latePenaltyStartTime;
+      recalcDate = getTodayStr();
     }
-
-    let recalcDate = null;
 
     if (setCheckoutOverride?.date && setCheckoutOverride?.time) {
       parseCheckoutTime(setCheckoutOverride.time);

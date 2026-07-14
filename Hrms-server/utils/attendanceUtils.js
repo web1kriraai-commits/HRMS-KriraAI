@@ -39,6 +39,7 @@ export const isClockInTimeAllowed = (
   const { hour, minute } = getWallClockHM(now, timeZone);
   return hour > checkInHour || (hour === checkInHour && minute >= checkInMinute);
 };
+/** Flat penalty while still inside the buffer window after cutoff (cutoff → cutoff+10m). */
 export const MIN_LATE_PENALTY_SECONDS = 15 * 60; // 900 seconds = 15 minutes
 const PENALTY_EFFECTIVE_DATE = '2026-03-01'; // Apply to current records
 export const OVERTIME_POLICY_EFFECTIVE_DATE = '2026-04-06';
@@ -150,8 +151,10 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
     };
   }
 
-  // Late check-in penalty: deduct 15 minutes from effective worked time
-  // ONLY apply penalty if date is on or after PENALTY_EFFECTIVE_DATE AND penalties are not disabled
+  // Late check-in penalty (relative to cutoff, e.g. 09:05):
+  // - After cutoff through ~cutoff+10m (e.g. 09:05–09:15): flat 15 minutes
+  // - After that: exact minutes past cutoff (e.g. 09:25 → 20m, 09:30 → 25m)
+  // ONLY apply if date is on or after PENALTY_EFFECTIVE_DATE AND penalties are not disabled
   const late = isLateCheckIn(checkInTime, latePenaltyStartTime, timeZone);
   let penaltySeconds = 0;
 
@@ -161,7 +164,6 @@ export const getFlags = (workedSeconds, isHalfDayApproved, extraTimeLeaveMinutes
 
     if (checkInDateStr >= PENALTY_EFFECTIVE_DATE) {
       const actualLatenessSeconds = calculateLatenessSeconds(checkInTime, latePenaltyStartTime, timeZone);
-      // Penalty is MIN_LATE_PENALTY_SECONDS (15 mins) OR actual lateness, whichever is greater
       penaltySeconds = Math.max(MIN_LATE_PENALTY_SECONDS, actualLatenessSeconds);
     }
   }
@@ -365,12 +367,19 @@ export const getLegacyGeneralOvertimeMinutes = (attendance) => {
 };
 
 /**
- * Resolve general OT minutes — never lower than previously stored legacy values.
- * Preserves existing overtimeRequest / generalOvertimeMinutes when recalc yields zero.
+ * Resolve general OT minutes from a fresh getFlags() calculation.
+ *
+ * Late-check-in penalty is already deducted inside getFlags before OT is computed, so
+ * calculatedMins must win over any larger legacy value (otherwise penalty minutes
+ * remain stuck in generalOvertimeMinutes via Math.max).
+ *
+ * Legacy values are only kept when we could not recalculate (no numeric calculatedMins).
  */
-export const resolveGeneralOvertimeMinutes = (attendance, calculatedMins = 0) => {
-  const legacyMins = getLegacyGeneralOvertimeMinutes(attendance);
-  return Math.max(calculatedMins || 0, legacyMins);
+export const resolveGeneralOvertimeMinutes = (attendance, calculatedMins = null) => {
+  if (typeof calculatedMins === 'number' && Number.isFinite(calculatedMins)) {
+    return Math.max(0, calculatedMins);
+  }
+  return getLegacyGeneralOvertimeMinutes(attendance);
 };
 
 /**
@@ -443,7 +452,7 @@ export const hydrateAttendanceOvertimeFields = (attendance) => {
   return doc;
 };
 
-/** Persist all three overtime types on the attendance record (non-destructive). */
+/** Persist all three overtime types on the attendance record (non-destructive for Management / Early OT). */
 export const syncAllOvertimeRecords = (attendance, flags, context = {}) => {
   const {
     isHalfDayApproved = false,
@@ -451,13 +460,17 @@ export const syncAllOvertimeRecords = (attendance, flags, context = {}) => {
     workedMinutes = 0
   } = context;
 
-  const calculatedMins = flags.completedGeneralOvertime ?? flags.completedOvertime ?? 0;
+  // Prefer completedGeneralOvertime (post-penalty). Coerce missing to 0 when flags object is present.
+  const calculatedMins = Math.max(
+    0,
+    flags?.completedGeneralOvertime ?? flags?.completedOvertime ?? 0
+  );
   const generalMins = resolveGeneralOvertimeMinutes(attendance, calculatedMins);
   attendance.generalOvertimeMinutes = generalMins;
   attendance.rawOvertimeSurplusMinutes = generalMins;
 
-  // Mirror to legacy overtimeRequest only when new OT is calculated — never clear existing legacy data
-  if (calculatedMins > 0 && flags.extraTime) {
+  // Keep legacy overtimeRequest in sync with post-penalty automatic OT
+  if (generalMins > 0 && flags.extraTime) {
     const prev = attendance.overtimeRequest || {};
     attendance.overtimeRequest = {
       reason: prev.reason || 'Automatic (worked beyond 8h 15m)',
@@ -469,8 +482,22 @@ export const syncAllOvertimeRecords = (attendance, flags, context = {}) => {
       completedMinutes: generalMins,
       unfulfilledMinutes: prev.unfulfilledMinutes || 0
     };
+  } else if (attendance.checkOut && attendance.overtimeRequest) {
+    // Day finalized with no automatic OT — clear inflated automatic OT (do not touch Management OT)
+    const reason = attendance.overtimeRequest.reason || '';
+    const isAutomatic =
+      !reason ||
+      reason.includes('Automatic') ||
+      reason.includes('worked beyond') ||
+      reason.includes('Holiday work');
+    if (isAutomatic) {
+      attendance.overtimeRequest.completedMinutes = 0;
+      attendance.overtimeRequest.durationMinutes = 0;
+      if (attendance.overtimeRequest.status === 'Approved') {
+        attendance.overtimeRequest.status = 'None';
+      }
+    }
   }
-  // Intentionally do NOT reset overtimeRequest when calculatedMins is 0 — preserves all historical records
 
   // Early overtime deficit — only set when not already recorded; never reset coveredMinutes
   if (earlyLogoutApproved && attendance.checkOut) {
@@ -491,12 +518,13 @@ export const syncAllOvertimeRecords = (attendance, flags, context = {}) => {
     syncEarlyOvertimeStatus(attendance);
   }
 
-  const legacyGeneral = getLegacyGeneralOvertimeMinutes(attendance);
   attendance.extraTimeFlag =
     generalMins > 0 ||
-    legacyGeneral > 0 ||
     (attendance.managementOvertime?.status === 'Approved' &&
-      (attendance.managementOvertime?.completedMinutes || 0) > 0);
+      (attendance.managementOvertime?.completedMinutes || 0) > 0) ||
+    ((attendance.earlyLogoutRequest === 'Approved' ||
+      attendance.earlyOvertime?.requestStatus === 'Approved') &&
+      (attendance.earlyOvertime?.completedMinutes || 0) > 0);
 
   return attendance;
 };

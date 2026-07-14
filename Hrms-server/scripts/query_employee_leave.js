@@ -116,9 +116,9 @@ async function run() {
 
   const isPresent = (r) => {
     if (!r) return false;
-    if (r.checkIn && r.checkOut) return true;
+    if (r.checkIn) return true;
     if (r.manualHours && r.manualHours.length > 0) return true;
-    if (!r.checkIn && !r.checkOut && (r.totalWorkedSeconds || 0) > 0) return true;
+    if ((r.totalWorkedSeconds || 0) > 0) return true;
     return false;
   };
 

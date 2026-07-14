@@ -175,6 +175,74 @@ const finalizeOvertimeBuckets = async (attendance, snapshot) => {
 };
 
 /**
+ * Recalculate worked time + general/management/early OT after admin/HR sets check-in/out.
+ * Returns same-month deficit records that may also need saving.
+ */
+const recalculateOvertimeForManualAttendance = async (attendance, { preserveManualStatusFlags = false } = {}) => {
+  if (!attendance.checkIn || !attendance.checkOut) {
+    // Incomplete day — clear automatic general OT so manual partial edits don't leave stale OT
+    attendance.generalOvertimeMinutes = 0;
+    attendance.rawOvertimeSurplusMinutes = 0;
+    if (attendance.overtimeRequest) {
+      const reason = attendance.overtimeRequest.reason || '';
+      const isAutomatic =
+        !reason ||
+        reason.includes('Automatic') ||
+        reason.includes('worked beyond') ||
+        reason.includes('Holiday work');
+      if (isAutomatic) {
+        attendance.overtimeRequest.completedMinutes = 0;
+        attendance.overtimeRequest.durationMinutes = 0;
+        if (attendance.overtimeRequest.status === 'Approved') {
+          attendance.overtimeRequest.status = 'None';
+        }
+      }
+    }
+    if (attendance.checkIn) {
+      attendance.totalWorkedSeconds = calculateWorkedSeconds(attendance);
+    }
+    return [];
+  }
+
+  const prevLow = attendance.lowTimeFlag;
+  const prevExtra = attendance.extraTimeFlag;
+  const snapshot = await getAttendanceOvertimeSnapshot(attendance);
+  const sameMonthDeficitRecords = await finalizeOvertimeBuckets(attendance, snapshot);
+
+  // Admin manually forced low/extra status — keep those flags, still keep OT minutes from worked time
+  if (preserveManualStatusFlags || attendance.isManualFlag) {
+    if (typeof prevLow === 'boolean') attendance.lowTimeFlag = prevLow;
+    if (typeof prevExtra === 'boolean') attendance.extraTimeFlag = prevExtra;
+  }
+
+  return sameMonthDeficitRecords;
+};
+
+/** Parse Admin/HR HH:mm or h:mm AM/PM into a wall-clock Date on attendance.date in company TZ. */
+const parseAdminTimeOnDate = (dateStr, timeStr, timeZone = 'Asia/Kolkata') => {
+  if (!timeStr || !dateStr) return null;
+  let hours;
+  let minutes;
+  const trimmed = String(timeStr).trim();
+
+  if (/AM|PM/i.test(trimmed)) {
+    const [timePart, period] = trimmed.split(/\s*(AM|PM)/i);
+    const [h, m] = timePart.split(':');
+    hours = parseInt(h, 10);
+    minutes = parseInt(m || '0', 10);
+    if (String(period).toUpperCase() === 'PM' && hours !== 12) hours += 12;
+    if (String(period).toUpperCase() === 'AM' && hours === 12) hours = 0;
+  } else {
+    const [h, m] = trimmed.split(':');
+    hours = parseInt(h, 10);
+    minutes = parseInt(m || '0', 10);
+  }
+
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return buildWallClockDateTime(dateStr, hours, minutes, timeZone);
+};
+
+/**
  * Auto-checkout all open attendance sessions at 10:00 PM (company timezone).
  * Closes any active break and finalizes worked time / OT flags like a normal checkout.
  */
@@ -677,309 +745,84 @@ export const adminCreateAttendance = async (req, res) => {
       return res.status(400).json({ message: 'userId and date are required' });
     }
 
+    const settings = await SystemSettings.getSettings();
+    const tz = settings?.timezone || 'Asia/Kolkata';
+
     // Check if record exists
     let attendance = await Attendance.findOne({ userId, date });
+    const isUpdate = !!attendance;
+    const beforeData = attendance ? JSON.stringify(attendance.toObject()) : null;
 
-    if (attendance) {
-      // Update existing record
-      const beforeData = JSON.stringify(attendance.toObject());
-
-      // Parse time strings and combine with date
-      const baseDate = new Date(date);
-
-      if (checkIn) {
-        // Handle time format like "09:00" or "09:00 AM"
-        let timeStr = checkIn.trim();
-        let hours, minutes;
-
-        if (timeStr.includes('AM') || timeStr.includes('PM')) {
-          // 12-hour format
-          const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
-          const [h, m] = timePart.split(':');
-          hours = parseInt(h, 10);
-          minutes = parseInt(m || '0', 10);
-
-          if (period.toUpperCase() === 'PM' && hours !== 12) {
-            hours += 12;
-          } else if (period.toUpperCase() === 'AM' && hours === 12) {
-            hours = 0;
-          }
-        } else {
-          // 24-hour format
-          const [h, m] = timeStr.split(':');
-          hours = parseInt(h, 10);
-          minutes = parseInt(m || '0', 10);
-        }
-
-        attendance.checkIn = new Date(baseDate);
-        attendance.checkIn.setHours(hours, minutes, 0, 0);
-      }
-
-      if (checkOut) {
-        // Handle time format like "18:00" or "06:00 PM"
-        let timeStr = checkOut.trim();
-        let hours, minutes;
-
-        if (timeStr.includes('AM') || timeStr.includes('PM')) {
-          // 12-hour format
-          const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
-          const [h, m] = timePart.split(':');
-          hours = parseInt(h, 10);
-          minutes = parseInt(m || '0', 10);
-
-          if (period.toUpperCase() === 'PM' && hours !== 12) {
-            hours += 12;
-          } else if (period.toUpperCase() === 'AM' && hours === 12) {
-            hours = 0;
-          }
-        } else {
-          // 24-hour format
-          const [h, m] = timeStr.split(':');
-          hours = parseInt(h, 10);
-          minutes = parseInt(m || '0', 10);
-        }
-
-        attendance.checkOut = new Date(baseDate);
-        attendance.checkOut.setHours(hours, minutes, 0, 0);
-      }
-
-      if (notes !== undefined) attendance.notes = notes;
-      if (isCompulsoryBreakDisabled !== undefined) attendance.isCompulsoryBreakDisabled = isCompulsoryBreakDisabled;
-
-      if (breakDurationMinutes !== undefined) {
-        const startTime = attendance.checkIn ? attendance.checkIn.getTime() : Date.now();
-        attendance.breaks = [{
-          start: new Date(startTime + 1000),
-          end: new Date(startTime + 1000 + (breakDurationMinutes * 60 * 1000)),
-          type: 'Standard',
-          durationSeconds: breakDurationMinutes * 60
-        }];
-      }
-
-      let flags = null;
-      if (attendance.checkIn && attendance.checkOut) {
-        const worked = calculateWorkedSeconds(attendance);
-        // Check if the attendance date is a company holiday
-        const isHolidayWork = await checkIsHoliday(attendance.date);
-
-        const hasHalfDay = await LeaveRequest.findOne({
-          userId: attendance.userId,
-          startDate: attendance.date,
-          category: 'Half Day Leave',
-          status: 'Approved'
-        });
-
-        // Check for Extra Time Leave
-        let extraTimeLeaveMinutes = 0;
-        const extraTimeLeave = await LeaveRequest.findOne({
-          userId: attendance.userId,
-          startDate: attendance.date,
-          category: 'Extra Time Leave',
-          status: 'Approved'
-        });
-
-        if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
-          const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
-          const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
-          const startMinutes = startH * 60 + startM;
-          const endMinutes = endH * 60 + endM;
-          extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
-        }
-
-        const settings = await SystemSettings.getSettings();
-        flags = getFlags(
-          worked,
-          !!hasHalfDay,
-          extraTimeLeaveMinutes,
-          isHolidayWork,
-          attendance.checkIn,
-          !!isPenaltyDisabled || !!attendance.isPenaltyDisabled,
-          0,
-          attendance.date,
-          hasCheckoutOverrideForDate(settings, attendance.date),
-          resolveLatePenaltyStartTime(settings, attendance.date), settings?.timezone || 'Asia/Kolkata'
-        );
-        // Store penalty-adjusted worked time so displayed hours already reflect the deduction
-        attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
-        attendance.lowTimeFlag = flags.lowTime;
-        attendance.extraTimeFlag = flags.extraTime;
-        attendance.penaltySeconds = flags.penaltySeconds;
-      }
-
-      await attendance.save();
-      const afterData = JSON.stringify(attendance.toObject());
-
-      let logMessage = `Modified attendance record for ${date}`;
-      if (flags && flags.lateCheckIn) {
-        logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
-      }
-
-      await logAction(
-        req.user._id,
-        req.user.name,
-        'UPDATE_ATTENDANCE',
-        'ATTENDANCE',
-        attendance._id.toString(),
-        logMessage,
-        beforeData,
-        afterData
-      );
-
-      return res.json(toAttendanceResponse(attendance));
+    if (!attendance) {
+      attendance = new Attendance({
+        userId,
+        date,
+        breaks: [],
+        notes,
+        totalWorkedSeconds: 0,
+        lowTimeFlag: false,
+        isManualFlag: false,
+        isPenaltyDisabled: !!isPenaltyDisabled,
+        isCompulsoryBreakDisabled: !!isCompulsoryBreakDisabled
+      });
     }
-
-    // Create new record
-    const baseDate = new Date(date);
-    let checkInDate = null;
-    let checkOutDate = null;
 
     if (checkIn) {
-      // Handle time format like "09:00" or "09:00 AM"
-      let timeStr = checkIn.trim();
-      let hours, minutes;
-
-      if (timeStr.includes('AM') || timeStr.includes('PM')) {
-        // 12-hour format
-        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
-        const [h, m] = timePart.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-
-        if (period.toUpperCase() === 'PM' && hours !== 12) {
-          hours += 12;
-        } else if (period.toUpperCase() === 'AM' && hours === 12) {
-          hours = 0;
-        }
-      } else {
-        // 24-hour format
-        const [h, m] = timeStr.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-      }
-
-      checkInDate = new Date(baseDate);
-      checkInDate.setHours(hours, minutes, 0, 0);
+      const parsed = parseAdminTimeOnDate(date, checkIn, tz);
+      if (parsed) attendance.checkIn = parsed;
     }
-
     if (checkOut) {
-      // Handle time format like "18:00" or "06:00 PM"
-      let timeStr = checkOut.trim();
-      let hours, minutes;
-
-      if (timeStr.includes('AM') || timeStr.includes('PM')) {
-        // 12-hour format
-        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
-        const [h, m] = timePart.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-
-        if (period.toUpperCase() === 'PM' && hours !== 12) {
-          hours += 12;
-        } else if (period.toUpperCase() === 'AM' && hours === 12) {
-          hours = 0;
-        }
-      } else {
-        // 24-hour format
-        const [h, m] = timeStr.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-      }
-
-      checkOutDate = new Date(baseDate);
-      checkOutDate.setHours(hours, minutes, 0, 0);
+      const parsed = parseAdminTimeOnDate(date, checkOut, tz);
+      if (parsed) attendance.checkOut = parsed;
     }
 
-    const breaks = [];
-    if (breakDurationMinutes && checkInDate) {
-      breaks.push({
-        start: new Date(checkInDate.getTime() + 1000),
-        end: new Date(checkInDate.getTime() + 1000 + (breakDurationMinutes * 60 * 1000)),
+    if (notes !== undefined) attendance.notes = notes;
+    if (isPenaltyDisabled !== undefined) attendance.isPenaltyDisabled = !!isPenaltyDisabled;
+    if (isCompulsoryBreakDisabled !== undefined) {
+      attendance.isCompulsoryBreakDisabled = !!isCompulsoryBreakDisabled;
+    }
+
+    if (breakDurationMinutes !== undefined && attendance.checkIn) {
+      const startTime = attendance.checkIn.getTime();
+      attendance.breaks = [{
+        start: new Date(startTime + 1000),
+        end: new Date(startTime + 1000 + (breakDurationMinutes * 60 * 1000)),
         type: 'Standard',
         durationSeconds: breakDurationMinutes * 60
-      });
+      }];
     }
 
-    attendance = new Attendance({
-      userId,
-      date,
-      checkIn: checkInDate,
-      checkOut: checkOutDate,
-      breaks,
-      notes,
-      totalWorkedSeconds: 0,
-      lowTimeFlag: false,
-      isManualFlag: false,
-      isPenaltyDisabled: !!isPenaltyDisabled,
-      isCompulsoryBreakDisabled: !!isCompulsoryBreakDisabled
-    });
-
-    let flags = null;
-    if (checkInDate && checkOutDate) {
-      const worked = calculateWorkedSeconds(attendance);
-      // Check if the date is a company holiday
-      const isHolidayWork = await checkIsHoliday(date);
-
-      const hasHalfDay = await LeaveRequest.findOne({
-        userId,
-        startDate: date,
-        category: 'Half Day Leave',
-        status: 'Approved'
-      });
-
-      // Check for Extra Time Leave
-      let extraTimeLeaveMinutes = 0;
-      const extraTimeLeave = await LeaveRequest.findOne({
-        userId,
-        startDate: date,
-        category: 'Extra Time Leave',
-        status: 'Approved'
-      });
-
-      if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
-        const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
-        const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
-        const startMinutes = startH * 60 + startM;
-        const endMinutes = endH * 60 + endM;
-        extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
-      }
-
-      const settingsForFlags = await SystemSettings.getSettings();
-      flags = getFlags(
-        worked,
-        !!hasHalfDay,
-        extraTimeLeaveMinutes,
-        isHolidayWork,
-        checkInDate,
-        !!isPenaltyDisabled,
-        0,
-        date,
-        hasCheckoutOverrideForDate(settingsForFlags, date),
-        resolveLatePenaltyStartTime(settingsForFlags, date), settingsForFlags?.timezone || 'Asia/Kolkata'
-      );
-      // Store penalty-adjusted worked time so displayed hours already reflect the deduction
-      attendance.totalWorkedSeconds = Math.max(0, worked - flags.penaltySeconds);
-      attendance.lowTimeFlag = flags.lowTime;
-      attendance.extraTimeFlag = flags.extraTime;
-      attendance.penaltySeconds = flags.penaltySeconds;
-    }
-
+    // Recalculate worked time + OT whenever admin/HR sets check-in/out
+    const sameMonthDeficitRecords = await recalculateOvertimeForManualAttendance(attendance);
     await attendance.save();
+    if (sameMonthDeficitRecords.length > 0) {
+      await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+    }
 
-    let logMessage = `Created attendance record for ${date}`;
-    if (flags && flags.lateCheckIn && flags.penaltySeconds > 0) {
-      logMessage += ` (Late Check-in Penalty: ${Math.round(flags.penaltySeconds / 60)} minutes)`;
+    const afterData = JSON.stringify(attendance.toObject());
+    let logMessage = `${isUpdate ? 'Modified' : 'Created'} attendance record for ${date}`;
+    if (attendance.lateCheckIn && attendance.penaltySeconds > 0) {
+      logMessage += ` (Late Check-in Penalty: ${Math.round(attendance.penaltySeconds / 60)} minutes)`;
+    }
+    if ((attendance.generalOvertimeMinutes || 0) > 0) {
+      logMessage += ` (General OT: ${attendance.generalOvertimeMinutes}m)`;
     }
 
     await logAction(
       req.user._id,
       req.user.name,
-      'CREATE_ATTENDANCE',
+      isUpdate ? 'UPDATE_ATTENDANCE' : 'CREATE_ATTENDANCE',
       'ATTENDANCE',
       attendance._id.toString(),
-      logMessage
+      logMessage,
+      beforeData,
+      afterData
     );
 
-    res.status(201).json(attendance);
+    if (isUpdate) {
+      return res.json(toAttendanceResponse(attendance));
+    }
+    res.status(201).json(toAttendanceResponse(attendance));
   } catch (error) {
     console.error('Admin create attendance error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -989,7 +832,19 @@ export const adminCreateAttendance = async (req, res) => {
 export const adminUpdateAttendance = async (req, res) => {
   try {
     const { recordId } = req.params;
-    const { checkIn, checkOut, breakDurationMinutes, notes, isPenaltyDisabled, isCompulsoryBreakDisabled, isManualFlag, lowTimeFlag, extraTimeFlag, totalWorkedSeconds: bodyTotalWorkedSeconds, workedHours: bodyWorkedHours } = req.body;
+    const {
+      checkIn,
+      checkOut,
+      breakDurationMinutes,
+      notes,
+      isPenaltyDisabled,
+      isCompulsoryBreakDisabled,
+      isManualFlag,
+      lowTimeFlag,
+      extraTimeFlag,
+      totalWorkedSeconds: bodyTotalWorkedSeconds,
+      workedHours: bodyWorkedHours
+    } = req.body;
 
     const attendance = await Attendance.findById(recordId);
     if (!attendance) {
@@ -997,71 +852,24 @@ export const adminUpdateAttendance = async (req, res) => {
     }
 
     const beforeData = JSON.stringify(attendance.toObject());
-
-    // Parse time strings and combine with date
-    const baseDate = new Date(attendance.date);
+    const settings = await SystemSettings.getSettings();
+    const tz = settings?.timezone || 'Asia/Kolkata';
+    const timesChanged = checkIn !== undefined || checkOut !== undefined || breakDurationMinutes !== undefined;
 
     if (checkIn) {
-      // Handle time format like "09:00" or "09:00 AM"
-      let timeStr = checkIn.trim();
-      let hours, minutes;
-
-      if (timeStr.includes('AM') || timeStr.includes('PM')) {
-        // 12-hour format
-        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
-        const [h, m] = timePart.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-
-        if (period.toUpperCase() === 'PM' && hours !== 12) {
-          hours += 12;
-        } else if (period.toUpperCase() === 'AM' && hours === 12) {
-          hours = 0;
-        }
-      } else {
-        // 24-hour format
-        const [h, m] = timeStr.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-      }
-
-      attendance.checkIn = new Date(baseDate);
-      attendance.checkIn.setHours(hours, minutes, 0, 0);
+      const parsed = parseAdminTimeOnDate(attendance.date, checkIn, tz);
+      if (parsed) attendance.checkIn = parsed;
     }
-
     if (checkOut) {
-      // Handle time format like "18:00" or "06:00 PM"
-      let timeStr = checkOut.trim();
-      let hours, minutes;
-
-      if (timeStr.includes('AM') || timeStr.includes('PM')) {
-        // 12-hour format
-        const [timePart, period] = timeStr.split(/\s*(AM|PM)/i);
-        const [h, m] = timePart.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-
-        if (period.toUpperCase() === 'PM' && hours !== 12) {
-          hours += 12;
-        } else if (period.toUpperCase() === 'AM' && hours === 12) {
-          hours = 0;
-        }
-      } else {
-        // 24-hour format
-        const [h, m] = timeStr.split(':');
-        hours = parseInt(h, 10);
-        minutes = parseInt(m || '0', 10);
-      }
-
-      attendance.checkOut = new Date(baseDate);
-      attendance.checkOut.setHours(hours, minutes, 0, 0);
+      const parsed = parseAdminTimeOnDate(attendance.date, checkOut, tz);
+      if (parsed) attendance.checkOut = parsed;
     }
 
     if (isPenaltyDisabled !== undefined) attendance.isPenaltyDisabled = isPenaltyDisabled;
     if (isCompulsoryBreakDisabled !== undefined) attendance.isCompulsoryBreakDisabled = isCompulsoryBreakDisabled;
     if (notes !== undefined) attendance.notes = notes;
 
-    // Manual Flag Overrides
+    // Manual Flag Overrides (status display)
     if (isManualFlag !== undefined) {
       attendance.isManualFlag = isManualFlag;
       if (isManualFlag) {
@@ -1070,7 +878,6 @@ export const adminUpdateAttendance = async (req, res) => {
       }
     }
 
-    // Override breaks if provided
     if (breakDurationMinutes !== undefined) {
       const startTime = attendance.checkIn ? attendance.checkIn.getTime() : Date.now();
       attendance.breaks = [{
@@ -1081,66 +888,54 @@ export const adminUpdateAttendance = async (req, res) => {
       }];
     }
 
-    // Allow admin to set worked hours for manual-only entries (no check-in/check-out) or override
+    // Explicit worked-hours override (manual-only entries without check-in/out)
+    const hasExplicitWorkedOverride =
+      (bodyTotalWorkedSeconds !== undefined && bodyTotalWorkedSeconds !== null) ||
+      (bodyWorkedHours !== undefined && bodyWorkedHours !== null);
+
     if (bodyTotalWorkedSeconds !== undefined && bodyTotalWorkedSeconds !== null) {
-      const sec = Math.max(0, Math.round(Number(bodyTotalWorkedSeconds)));
-      attendance.totalWorkedSeconds = sec;
+      attendance.totalWorkedSeconds = Math.max(0, Math.round(Number(bodyTotalWorkedSeconds)));
     } else if (bodyWorkedHours !== undefined && bodyWorkedHours !== null) {
-      const sec = Math.max(0, Math.round(Number(bodyWorkedHours) * 3600));
-      attendance.totalWorkedSeconds = sec;
+      attendance.totalWorkedSeconds = Math.max(0, Math.round(Number(bodyWorkedHours) * 3600));
     }
 
-    // Only recalculate if NOT manually flagged
-    if (!attendance.isManualFlag && attendance.checkIn && attendance.checkOut) {
-      const worked = calculateWorkedSeconds(attendance);
-      // Check if the attendance date is a company holiday
-      const isHolidayWork = await checkIsHoliday(attendance.date);
+    let sameMonthDeficitRecords = [];
 
-      const hasHalfDay = await LeaveRequest.findOne({
-        userId: attendance.userId,
-        startDate: attendance.date,
-        category: 'Half Day Leave',
-        status: 'Approved'
+    // When Admin/HR manages check-in/out (or times change), always maintain OT from worked time
+    if (attendance.checkIn && attendance.checkOut && !hasExplicitWorkedOverride) {
+      sameMonthDeficitRecords = await recalculateOvertimeForManualAttendance(attendance, {
+        preserveManualStatusFlags: !!attendance.isManualFlag && !timesChanged
       });
-
-      // Check for Extra Time Leave
-      let extraTimeLeaveMinutes = 0;
-      const extraTimeLeave = await LeaveRequest.findOne({
-        userId: attendance.userId,
-        startDate: attendance.date,
-        category: 'Extra Time Leave',
-        status: 'Approved'
-      });
-
-      if (extraTimeLeave && extraTimeLeave.startTime && extraTimeLeave.endTime) {
-        const [startH, startM] = extraTimeLeave.startTime.split(':').map(Number);
-        const [endH, endM] = extraTimeLeave.endTime.split(':').map(Number);
-        const startMinutes = startH * 60 + startM;
-        const endMinutes = endH * 60 + endM;
-        extraTimeLeaveMinutes = Math.max(0, endMinutes - startMinutes);
-      }
-
-      const settingsForFlags = await SystemSettings.getSettings();
-      const flags = getFlags(
-        worked,
-        !!hasHalfDay,
-        extraTimeLeaveMinutes,
-        isHolidayWork,
-        attendance.checkIn,
-        attendance.isPenaltyDisabled,
-        0,
-        attendance.date,
-        hasCheckoutOverrideForDate(settingsForFlags, attendance.date),
-        resolveLatePenaltyStartTime(settingsForFlags, attendance.date), settingsForFlags?.timezone || 'Asia/Kolkata'
+    } else if (attendance.checkIn && attendance.checkOut && hasExplicitWorkedOverride) {
+      // Admin set explicit worked seconds — derive OT from that value (post-penalty via getFlags on gross is N/A;
+      // treat stored total as already net and compute OT above 8h15m / holiday rules)
+      const snapshot = await getAttendanceOvertimeSnapshot(
+        attendance,
+        Math.max(
+          0,
+          (attendance.totalWorkedSeconds || 0) + (attendance.penaltySeconds || 0)
+        )
       );
-      applyFlagsToAttendance(attendance, flags, worked);
-    } else if (attendance.checkIn && attendance.checkOut) {
-      // Still update worked time even if flags are manual
-      attendance.totalWorkedSeconds = calculateWorkedSeconds(attendance);
+      sameMonthDeficitRecords = await finalizeOvertimeBuckets(attendance, snapshot);
+      if (attendance.isManualFlag) {
+        if (lowTimeFlag !== undefined) attendance.lowTimeFlag = lowTimeFlag;
+        if (extraTimeFlag !== undefined) attendance.extraTimeFlag = extraTimeFlag;
+      }
+    } else if (!attendance.checkOut) {
+      // Checkout cleared or missing — drop stale automatic OT
+      sameMonthDeficitRecords = await recalculateOvertimeForManualAttendance(attendance);
     }
 
     await attendance.save();
+    if (sameMonthDeficitRecords.length > 0) {
+      await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+    }
+
     const afterData = JSON.stringify(attendance.toObject());
+    let logMessage = `Modified attendance record for ${attendance.date}${attendance.isManualFlag ? ' (Manual Status)' : ''}`;
+    if ((attendance.generalOvertimeMinutes || 0) > 0) {
+      logMessage += ` (General OT: ${attendance.generalOvertimeMinutes}m)`;
+    }
 
     await logAction(
       req.user._id,
@@ -1148,7 +943,7 @@ export const adminUpdateAttendance = async (req, res) => {
       'UPDATE_ATTENDANCE',
       'ATTENDANCE',
       recordId,
-      `Modified attendance record for ${attendance.date}${attendance.isManualFlag ? ' (Manual Status)' : ''}`,
+      logMessage,
       beforeData,
       afterData
     );
@@ -2243,21 +2038,23 @@ export const reviewEarlyOvertimeRepayment = async (req, res) => {
 
 /** Recalculate low/extra flags for all checked-out records on a date (e.g. after checkout override change). */
 export const recalculateAttendanceFlagsForDate = async (dateStr) => {
-  if (!dateStr) return { updated: 0 };
+  if (!dateStr) return { updated: 0, total: 0 };
 
   const settings = await SystemSettings.getSettings();
   const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, dateStr);
+  const tz = settings?.timezone || 'Asia/Kolkata';
+  const latePenaltyStartTime = resolveLatePenaltyStartTime(settings, dateStr);
+  const isHolidayWork = !!(await CompanyHoliday.findOne({ date: dateStr }));
 
+  // Include open sessions so late penalty updates when cutoff settings change mid-day
   const records = await Attendance.find({
     date: dateStr,
-    checkOut: { $exists: true, $ne: null },
+    checkIn: { $exists: true, $ne: null },
     isManualFlag: { $ne: true }
   });
 
   let updated = 0;
   for (const record of records) {
-    const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
-    const isHolidayWork = !!(await CompanyHoliday.findOne({ date: dateStr }));
     const hasHalfDay = await LeaveRequest.findOne({
       userId: record.userId,
       startDate: dateStr,
@@ -2278,19 +2075,40 @@ export const recalculateAttendanceFlagsForDate = async (dateStr) => {
       extraTimeLeaveMinutes = Math.max(0, endH * 60 + endM - (startH * 60 + startM));
     }
 
-    const flags = getFlags(
-      worked,
-      !!hasHalfDay,
-      extraTimeLeaveMinutes,
-      isHolidayWork,
-      record.checkIn,
-      record.isPenaltyDisabled,
-      0,
-      dateStr,
-      isEarlyReleaseDay,
-      resolveLatePenaltyStartTime(settings, dateStr), settings?.timezone || 'Asia/Kolkata'
-    );
-    applyFlagsToAttendance(record, flags, worked);
+    if (record.checkOut) {
+      const worked = calculateWorkedSeconds(record, record.checkOut.toISOString());
+      const flags = getFlags(
+        worked,
+        !!hasHalfDay,
+        extraTimeLeaveMinutes,
+        isHolidayWork,
+        record.checkIn,
+        record.isPenaltyDisabled,
+        0,
+        dateStr,
+        isEarlyReleaseDay,
+        latePenaltyStartTime,
+        tz
+      );
+      applyFlagsToAttendance(record, flags, worked);
+    } else {
+      const flags = getFlags(
+        0,
+        !!hasHalfDay,
+        0,
+        isHolidayWork,
+        record.checkIn,
+        record.isPenaltyDisabled,
+        0,
+        dateStr,
+        isEarlyReleaseDay,
+        latePenaltyStartTime,
+        tz
+      );
+      record.lateCheckIn = flags.lateCheckIn || false;
+      record.penaltySeconds = flags.penaltySeconds || 0;
+    }
+
     await record.save();
     updated += 1;
   }
