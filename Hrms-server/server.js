@@ -217,7 +217,7 @@ app.listen(PORT, async () => {
     () => runAutoCheckoutWithLog('10 PM cron'),
     { timezone: 'Asia/Kolkata' }
   );
-  console.log('Auto-checkout scheduled daily at 22:00 (10:00 PM, Asia/Kolkata)');
+  console.log('Auto-checkout scheduled daily at 22:00 (10:00 PM, Asia/Kolkata) — records checkout at completed working hours (min scheduled checkout)');
 
   // Catch-up on server start if already past 10 PM
   try {

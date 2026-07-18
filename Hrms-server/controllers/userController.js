@@ -2,7 +2,7 @@ import User from '../models/User.js';
 import Attendance from '../models/Attendance.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
-import { calculateWorkedSeconds, getFlags, resolveLatePenaltyStartTime } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, resolveLatePenaltyStartTime, buildEmployeeSchedule } from '../utils/attendanceUtils.js';
 import SystemSettings from '../models/SystemSettings.js';
 import { logAction } from './auditController.js';
 
@@ -308,6 +308,15 @@ export const deleteUser = async (req, res) => {
   }
 };
 
+const isValidHHmm = (value) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(String(value || '').trim());
+
+const normalizeOverrideMap = (overrides) => {
+  if (!overrides) return {};
+  if (overrides instanceof Map) return Object.fromEntries(overrides.entries());
+  if (typeof overrides === 'object') return { ...overrides };
+  return {};
+};
+
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
@@ -319,7 +328,15 @@ export const updateUser = async (req, res) => {
       mobileNumber, guardianMobileNumber, bankName, bankAccountHolderName,
       bankAccountNumber, bankIfscCode, salaryBreakdown, password,
       lastForwardedMonth, forwardedMonths, forwardedInMonths,
-      paidLeaveAccess
+      paidLeaveAccess,
+      defaultCheckInTime,
+      defaultCheckoutTime,
+      setCheckInOverride,
+      removeCheckInOverrideDate,
+      setCheckoutOverride,
+      removeCheckoutOverrideDate,
+      clearCheckInSchedule,
+      clearCheckoutSchedule
     } = req.body;
     const currentUser = req.user;
 
@@ -574,6 +591,67 @@ export const updateUser = async (req, res) => {
       user.forwardedInMonths = forwardedInMonths;
     }
 
+    // Per-employee check-in / checkout schedule (Admin / HR)
+    if (clearCheckInSchedule) {
+      user.defaultCheckInTime = null;
+      user.checkInTimeOverrides = new Map();
+      user.markModified('checkInTimeOverrides');
+    } else {
+      if (defaultCheckInTime !== undefined) {
+        if (defaultCheckInTime === null || defaultCheckInTime === '') {
+          user.defaultCheckInTime = null;
+        } else if (!isValidHHmm(defaultCheckInTime)) {
+          return res.status(400).json({ message: 'defaultCheckInTime must be HH:mm' });
+        } else {
+          user.defaultCheckInTime = String(defaultCheckInTime).trim();
+        }
+      }
+      if (setCheckInOverride?.date && setCheckInOverride?.time) {
+        if (!isValidHHmm(setCheckInOverride.time)) {
+          return res.status(400).json({ message: 'Check-in override time must be HH:mm' });
+        }
+        if (!user.checkInTimeOverrides) user.checkInTimeOverrides = new Map();
+        user.checkInTimeOverrides.set(setCheckInOverride.date, String(setCheckInOverride.time).trim());
+        user.markModified('checkInTimeOverrides');
+      }
+      if (removeCheckInOverrideDate) {
+        if (user.checkInTimeOverrides?.delete) {
+          user.checkInTimeOverrides.delete(removeCheckInOverrideDate);
+          user.markModified('checkInTimeOverrides');
+        }
+      }
+    }
+
+    if (clearCheckoutSchedule) {
+      user.defaultCheckoutTime = null;
+      user.checkoutTimeOverrides = new Map();
+      user.markModified('checkoutTimeOverrides');
+    } else {
+      if (defaultCheckoutTime !== undefined) {
+        if (defaultCheckoutTime === null || defaultCheckoutTime === '') {
+          user.defaultCheckoutTime = null;
+        } else if (!isValidHHmm(defaultCheckoutTime)) {
+          return res.status(400).json({ message: 'defaultCheckoutTime must be HH:mm' });
+        } else {
+          user.defaultCheckoutTime = String(defaultCheckoutTime).trim();
+        }
+      }
+      if (setCheckoutOverride?.date && setCheckoutOverride?.time) {
+        if (!isValidHHmm(setCheckoutOverride.time)) {
+          return res.status(400).json({ message: 'Checkout override time must be HH:mm' });
+        }
+        if (!user.checkoutTimeOverrides) user.checkoutTimeOverrides = new Map();
+        user.checkoutTimeOverrides.set(setCheckoutOverride.date, String(setCheckoutOverride.time).trim());
+        user.markModified('checkoutTimeOverrides');
+      }
+      if (removeCheckoutOverrideDate) {
+        if (user.checkoutTimeOverrides?.delete) {
+          user.checkoutTimeOverrides.delete(removeCheckoutOverrideDate);
+          user.markModified('checkoutTimeOverrides');
+        }
+      }
+    }
+
     await user.save();
     const afterData = JSON.stringify({
       name: user.name,
@@ -585,7 +663,11 @@ export const updateUser = async (req, res) => {
       aadhaarNumber: user.aadhaarNumber,
       guardianName: user.guardianName,
       mobileNumber: user.mobileNumber,
-      guardianMobileNumber: user.guardianMobileNumber
+      guardianMobileNumber: user.guardianMobileNumber,
+      defaultCheckInTime: user.defaultCheckInTime || null,
+      defaultCheckoutTime: user.defaultCheckoutTime || null,
+      checkInTimeOverrides: normalizeOverrideMap(user.checkInTimeOverrides),
+      checkoutTimeOverrides: normalizeOverrideMap(user.checkoutTimeOverrides)
     });
 
     await logAction(
@@ -601,6 +683,10 @@ export const updateUser = async (req, res) => {
 
     const userObj = user.toObject();
     delete userObj.password;
+    userObj.defaultCheckInTime = userObj.defaultCheckInTime || null;
+    userObj.defaultCheckoutTime = userObj.defaultCheckoutTime || null;
+    userObj.checkInTimeOverrides = normalizeOverrideMap(userObj.checkInTimeOverrides);
+    userObj.checkoutTimeOverrides = normalizeOverrideMap(userObj.checkoutTimeOverrides);
 
     res.json({ message: 'User updated successfully', user: userObj });
   } catch (error) {
@@ -678,7 +764,8 @@ export const getEmployeeStats = async (req, res) => {
           }
 
           const approvedOT = (record.overtimeRequest && record.overtimeRequest.status === 'Approved') ? record.overtimeRequest.durationMinutes : 0;
-          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, resolveLatePenaltyStartTime(systemSettings, record.date), systemSettings?.timezone || 'Asia/Kolkata');
+          const employeeSchedule = buildEmployeeSchedule(employee);
+          const flags = getFlags(worked, !!hasHalfDay, extraTimeLeaveMinutes, isHoliday, record.checkIn, record.isPenaltyDisabled, approvedOT, record.date, false, resolveLatePenaltyStartTime(systemSettings, record.date, employeeSchedule), systemSettings?.timezone || 'Asia/Kolkata');
           record.lowTimeFlag = flags.lowTime;
           record.extraTimeFlag = flags.extraTime;
           record.totalWorkedSeconds = worked;
@@ -777,6 +864,167 @@ export const getEmployeeStats = async (req, res) => {
     res.json(stats);
   } catch (error) {
     console.error('Get employee stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const SALARY_SLIP_NUMERIC_FIELDS = [
+  'stdDays', 'workedDays', 'leaveBalance',
+  'basic', 'da', 'totalWage', 'hra', 'medicalReimbursement', 'conveyance',
+  'lta', 'education', 'specialAllowance',
+  'pf', 'esic', 'pTax', 'lwf', 'tds', 'advance', 'exGratia', 'lessAdvance'
+];
+
+const SALARY_SLIP_TEXT_FIELDS = [
+  'companyName', 'companyAddress', 'preparedByName', 'preparedByTitle',
+  'empName', 'empNo', 'department', 'doj', 'bank', 'bankAccountNo',
+  'designation', 'pfNo', 'esicNo'
+];
+
+const buildSalarySlipPayload = (body, currentUser) => {
+  const month = parseInt(body.month, 10);
+  const year = parseInt(body.year, 10);
+  const slip = {
+    month,
+    year,
+    savedAt: new Date(),
+    savedBy: currentUser.name
+  };
+
+  for (const field of SALARY_SLIP_TEXT_FIELDS) {
+    slip[field] = body[field] != null ? String(body[field]) : '';
+  }
+  for (const field of SALARY_SLIP_NUMERIC_FIELDS) {
+    const value = Number(body[field]);
+    slip[field] = Number.isFinite(value) ? value : 0;
+  }
+
+  return slip;
+};
+
+/** Admin/HR: upsert a detailed salary slip for an employee (month/year) */
+export const saveSalarySlip = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const currentUser = req.user;
+    const month = parseInt(req.body.month, 10);
+    const year = parseInt(req.body.year, 10);
+
+    if (!month || month < 1 || month > 12 || !year) {
+      return res.status(400).json({ message: 'Valid month (1-12) and year are required' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (!user.salarySlips) {
+      user.salarySlips = [];
+    }
+
+    const slipPayload = buildSalarySlipPayload(req.body, currentUser);
+    const existingIndex = user.salarySlips.findIndex(
+      (item) => item.month === month && item.year === year
+    );
+
+    if (existingIndex >= 0) {
+      const existing = user.salarySlips[existingIndex];
+      Object.keys(slipPayload).forEach((key) => {
+        existing[key] = slipPayload[key];
+      });
+    } else {
+      user.salarySlips.push(slipPayload);
+    }
+
+    user.markModified('salarySlips');
+    await user.save();
+
+    const savedSlip = user.salarySlips.find(
+      (item) => item.month === month && item.year === year
+    );
+
+    await logAction(
+      currentUser._id,
+      currentUser.name,
+      'SAVE_SALARY_SLIP',
+      'USER',
+      userId,
+      `Saved salary slip for ${user.name} - ${month}/${year}`
+    );
+
+    res.json({
+      message: 'Salary slip saved successfully',
+      salarySlip: savedSlip
+    });
+  } catch (error) {
+    console.error('Save salary slip error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/** Authenticated user: get own salary slips (employees use this for preview/download) */
+export const getMySalarySlips = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('salarySlips');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const slips = (user.salarySlips || []).slice().sort((a, b) => {
+      if (a.year !== b.year) return b.year - a.year;
+      return b.month - a.month;
+    });
+
+    res.json({ salarySlips: slips });
+  } catch (error) {
+    console.error('Get my salary slips error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/** Authenticated user: get one of own salary slips by month/year */
+export const getMySalarySlip = async (req, res) => {
+  try {
+    const month = parseInt(req.params.month, 10);
+    const year = parseInt(req.params.year, 10);
+
+    const user = await User.findById(req.user._id).select('salarySlips');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const salarySlip = (user.salarySlips || []).find(
+      (item) => item.month === month && item.year === year
+    );
+
+    if (!salarySlip) {
+      return res.status(404).json({ message: 'Salary slip not found for the selected period' });
+    }
+
+    res.json({ salarySlip });
+  } catch (error) {
+    console.error('Get my salary slip error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/** Admin/HR: get salary slips for a specific employee */
+export const getUserSalarySlips = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const user = await User.findById(userId).select('name salarySlips');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      userId: user._id,
+      name: user.name,
+      salarySlips: user.salarySlips || []
+    });
+  } catch (error) {
+    console.error('Get user salary slips error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };

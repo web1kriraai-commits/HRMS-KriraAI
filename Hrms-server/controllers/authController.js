@@ -23,6 +23,12 @@ const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '365d' });
 };
 
+const mapOverridesToObject = (value) => {
+  if (!value) return {};
+  if (value instanceof Map) return Object.fromEntries(value.entries());
+  return { ...value };
+};
+
 /** Fields needed by the client dashboard (leave balances, paid-leave gate). */
 const userToAuthPayload = (user) => ({
   id: user._id,
@@ -45,13 +51,18 @@ const userToAuthPayload = (user) => ({
   joiningDate: user.joiningDate,
   bonds: user.bonds,
   salaryBreakdown: user.salaryBreakdown,
+  salarySlips: user.salarySlips || [],
   paidLeaveAllocation: user.paidLeaveAllocation ?? 0,
   paidLeaveLastAllocatedDate: user.paidLeaveLastAllocatedDate,
   manualPaidLeaveAdjustment: user.manualPaidLeaveAdjustment ?? 0,
   manualExtraTimeAdjustment: user.manualExtraTimeAdjustment ?? 0,
   manualUnpaidLeaveAdjustment: user.manualUnpaidLeaveAdjustment ?? 0,
   manualHalfDayLeaveAdjustment: user.manualHalfDayLeaveAdjustment ?? 0,
-  paidLeaveAccess: user.paidLeaveAccess !== false
+  paidLeaveAccess: user.paidLeaveAccess !== false,
+  defaultCheckInTime: user.defaultCheckInTime || null,
+  defaultCheckoutTime: user.defaultCheckoutTime || null,
+  checkInTimeOverrides: mapOverridesToObject(user.checkInTimeOverrides),
+  checkoutTimeOverrides: mapOverridesToObject(user.checkoutTimeOverrides)
 });
 
 export const login = async (req, res) => {

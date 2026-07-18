@@ -214,7 +214,8 @@ const applyUserUpdatesNative = async () => {
     ['forwardedMonths', {}],
     ['forwardedInMonths', {}],
     ['bonds', []],
-    ['salaryBreakdown', []]
+    ['salaryBreakdown', []],
+    ['salarySlips', []]
   ];
 
   for (const [field, defaultValue] of fields) {

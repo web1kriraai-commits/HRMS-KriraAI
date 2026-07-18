@@ -41,6 +41,8 @@ export const isClockInTimeAllowed = (
 };
 /** Flat penalty while still inside the buffer window after cutoff (cutoff → cutoff+10m). */
 export const MIN_LATE_PENALTY_SECONDS = 15 * 60; // 900 seconds = 15 minutes
+/** Grace period after resolved check-in time before late penalty applies. */
+export const LATE_CHECK_IN_BUFFER_MINUTES = 15;
 const PENALTY_EFFECTIVE_DATE = '2026-03-01'; // Apply to current records
 export const OVERTIME_POLICY_EFFECTIVE_DATE = '2026-04-06';
 export const COMPULSORY_BREAK_EFFECTIVE_DATE = '2026-04-06';
@@ -49,14 +51,48 @@ export const MIN_TOTAL_BREAK_SECONDS = 1200;
 
 /**
  * Penalty cutoff for a given attendance date.
- * Before LATE_PENALTY_915_EFFECTIVE_DATE → 09:00; on/after → settings or 09:15.
+ * Before LATE_PENALTY_915_EFFECTIVE_DATE → 09:00; on/after → max(configured penalty, check-in + 15m buffer).
  */
-export const resolveLatePenaltyStartTime = (settings, dateStr) => {
+export const addMinutesToTime = (hour, minute, minutesToAdd) => {
+  let total = hour * 60 + minute + minutesToAdd;
+  total = ((total % (24 * 60)) + (24 * 60)) % (24 * 60);
+  return { hour: Math.floor(total / 60), minute: total % 60 };
+};
+
+export const laterOfTimes = (a, b) => {
+  const aMins = a.hour * 60 + a.minute;
+  const bMins = b.hour * 60 + b.minute;
+  return aMins >= bMins ? a : b;
+};
+
+export const formatTimeHHmm = ({ hour, minute }) =>
+  `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+
+export const buildEmployeeSchedule = (user) => {
+  if (!user) return null;
+  const overridesToObject = (value) => {
+    if (!value) return {};
+    if (value instanceof Map) return Object.fromEntries(value.entries());
+    return { ...value };
+  };
+  return {
+    defaultCheckInTime: user.defaultCheckInTime || null,
+    defaultCheckoutTime: user.defaultCheckoutTime || null,
+    checkInTimeOverrides: overridesToObject(user.checkInTimeOverrides),
+    checkoutTimeOverrides: overridesToObject(user.checkoutTimeOverrides)
+  };
+};
+
+export const resolveLatePenaltyStartTime = (settings, dateStr, employeeSchedule = null) => {
   const normalizedDate = dateStr ? String(dateStr).slice(0, 10) : null;
   if (normalizedDate && normalizedDate < LATE_PENALTY_915_EFFECTIVE_DATE) {
     return LEGACY_LATE_PENALTY_START_TIME;
   }
-  return settings?.latePenaltyStartTime || CURRENT_LATE_PENALTY_START_TIME;
+  const configured = settings?.latePenaltyStartTime || CURRENT_LATE_PENALTY_START_TIME;
+  const checkIn = resolveCheckInTimeForDate(settings, normalizedDate || getTodayStr(), employeeSchedule);
+  const checkInWithBuffer = addMinutesToTime(checkIn.hour, checkIn.minute, LATE_CHECK_IN_BUFFER_MINUTES);
+  const configuredTime = parseCheckInTime(configured);
+  return formatTimeHHmm(laterOfTimes(checkInWithBuffer, configuredTime));
 };
 
 /**
@@ -280,6 +316,23 @@ export const getMonthKey = (dateStr) => (dateStr || '').slice(0, 7);
 export const recalculateOvertimeBuckets = (attendance, sameMonthDeficitRecords = []) => {
   const rawGeneralMinutes = attendance.rawOvertimeSurplusMinutes || attendance.generalOvertimeMinutes || 0;
 
+  // Early Leave OT request pending — hold surplus unallocated until Admin/HR manages it.
+  if (attendance.overtimeManageRequest?.status === 'Pending') {
+    if (!attendance.overtimeManageRequest) {
+      attendance.overtimeManageRequest = { status: 'Pending', allocations: {} };
+    }
+    attendance.overtimeManageRequest.extraMinutes = rawGeneralMinutes;
+    attendance.rawOvertimeSurplusMinutes = rawGeneralMinutes;
+    attendance.generalOvertimeMinutes = 0;
+    attendance.extraTimeFlag = rawGeneralMinutes > 0;
+    return {
+      mgmtMinutes: 0,
+      earlySurplusMinutes: 0,
+      repaymentMinutes: 0,
+      generalOvertimeMinutes: 0
+    };
+  }
+
   // Undo any repayment this record previously applied, so re-running this function with a
   // different Management OT / repayment approval state doesn't compound on stale allocations.
   let previouslyApplied = attendance.earlyOvertimeRepayment?.appliedMinutes || 0;
@@ -434,6 +487,26 @@ export const hydrateAttendanceOvertimeFields = (attendance) => {
             : 'None';
   }
 
+  if (!doc.overtimeManageRequest) {
+    doc.overtimeManageRequest = {
+      status: 'None',
+      note: '',
+      extraMinutes: 0,
+      allocationType: 'None',
+      allocations: {
+        generalMinutes: 0,
+        managementMinutes: 0,
+        earlyRequestMinutes: 0
+      }
+    };
+  } else if (!doc.overtimeManageRequest.allocations) {
+    doc.overtimeManageRequest.allocations = {
+      generalMinutes: 0,
+      managementMinutes: 0,
+      earlyRequestMinutes: 0
+    };
+  }
+
   // Keep legacy overtimeRequest intact; only ensure extraTimeFlag reflects all sources
   const hasGeneral =
     (doc.generalOvertimeMinutes || 0) > 0 ||
@@ -444,8 +517,11 @@ export const hydrateAttendanceOvertimeFields = (attendance) => {
   const hasEarlySurplus =
     (doc.earlyLogoutRequest === 'Approved' || doc.earlyOvertime?.requestStatus === 'Approved') &&
     (doc.earlyOvertime?.completedMinutes || 0) > 0;
+  const hasPendingManage =
+    doc.overtimeManageRequest?.status === 'Pending' &&
+    (doc.overtimeManageRequest?.extraMinutes || doc.rawOvertimeSurplusMinutes || 0) > 0;
 
-  if (hasGeneral || hasMgmt || hasEarlySurplus) {
+  if (hasGeneral || hasMgmt || hasEarlySurplus || hasPendingManage) {
     doc.extraTimeFlag = true;
   }
 
@@ -602,9 +678,21 @@ export const getCheckInOverrideForDate = (settings, dateStr) => {
   return null;
 };
 
-export const resolveCheckInTimeForDate = (settings, dateStr) => {
-  const override = getCheckInOverrideForDate(settings, dateStr);
-  return parseCheckInTime(override || settings?.defaultCheckInTime || DEFAULT_CHECK_IN_TIME);
+/**
+ * Priority: employee day override → company day override → employee default → company default
+ * @param {object} settings - SystemSettings
+ * @param {string} dateStr - YYYY-MM-DD
+ * @param {object|null} employeeSchedule - optional user fields { defaultCheckInTime, checkInTimeOverrides }
+ */
+export const resolveCheckInTimeForDate = (settings, dateStr, employeeSchedule = null) => {
+  const employeeDay = getCheckInOverrideForDate(employeeSchedule, dateStr);
+  if (employeeDay) return parseCheckInTime(employeeDay);
+  const companyDay = getCheckInOverrideForDate(settings, dateStr);
+  if (companyDay) return parseCheckInTime(companyDay);
+  if (employeeSchedule?.defaultCheckInTime) {
+    return parseCheckInTime(employeeSchedule.defaultCheckInTime);
+  }
+  return parseCheckInTime(settings?.defaultCheckInTime || DEFAULT_CHECK_IN_TIME);
 };
 
 export const hasCheckInOverrideForDate = (settings, dateStr) =>
@@ -617,14 +705,25 @@ export const getCheckoutOverrideForDate = (settings, dateStr) => {
   return null;
 };
 
-export const resolveCheckoutTimeForDate = (settings, dateStr) => {
-  const override = getCheckoutOverrideForDate(settings, dateStr);
-  return parseCheckoutTime(override || settings?.defaultCheckoutTime || DEFAULT_CHECKOUT_TIME);
+/**
+ * Priority: employee day override → company day override → employee default → company default
+ */
+export const resolveCheckoutTimeForDate = (settings, dateStr, employeeSchedule = null) => {
+  const employeeDay = getCheckoutOverrideForDate(employeeSchedule, dateStr);
+  if (employeeDay) return parseCheckoutTime(employeeDay);
+  const companyDay = getCheckoutOverrideForDate(settings, dateStr);
+  if (companyDay) return parseCheckoutTime(companyDay);
+  if (employeeSchedule?.defaultCheckoutTime) {
+    return parseCheckoutTime(employeeSchedule.defaultCheckoutTime);
+  }
+  return parseCheckoutTime(settings?.defaultCheckoutTime || DEFAULT_CHECKOUT_TIME);
 };
 
 /** Admin set a custom checkout time for this calendar day (early release / special day). */
-export const hasCheckoutOverrideForDate = (settings, dateStr) =>
-  Boolean(getCheckoutOverrideForDate(settings, dateStr));
+export const hasCheckoutOverrideForDate = (settings, dateStr, employeeSchedule = null) =>
+  Boolean(
+    getCheckoutOverrideForDate(employeeSchedule, dateStr) || getCheckoutOverrideForDate(settings, dateStr)
+  );
 
 export const formatCheckoutTimeLabel = (hour, minute) => {
   const h12 = hour % 12 || 12;
@@ -669,6 +768,67 @@ export const isWorkedSecondsSufficientForCheckout = (
 /** Default auto-checkout wall-clock time when employee has not checked out. */
 export const AUTO_CHECKOUT_HOUR = 22;
 export const AUTO_CHECKOUT_MINUTE = 0;
+
+/**
+ * Forgotten-checkout timestamp for the 10 PM auto-checkout job.
+ *
+ * Still triggered at 10 PM, but the stored check-out time is when the employee
+ * completed the required net working hours (8h 15m / half-day) including breaks:
+ * - If that completion is before the scheduled checkout (default 17:30) → use 17:30
+ * - If completion is after scheduled checkout → use the completion time
+ * - Never later than the 10 PM auto-cap
+ *
+ * Example: check-in 08:40 + 20m break + 8h15m → completes ~17:15 → checkout 17:30
+ */
+export const resolveForgottenCheckoutTime = (
+  attendance,
+  {
+    dateStr,
+    timeZone = 'Asia/Kolkata',
+    scheduledCheckoutHour = 17,
+    scheduledCheckoutMinute = 30,
+    minShiftSeconds = FULL_DAY_MIN_SHIFT_SECONDS,
+    autoCapHour = AUTO_CHECKOUT_HOUR,
+    autoCapMinute = AUTO_CHECKOUT_MINUTE
+  } = {}
+) => {
+  const autoCap = buildWallClockDateTime(dateStr, autoCapHour, autoCapMinute, timeZone);
+  const scheduledCheckout = buildWallClockDateTime(
+    dateStr,
+    scheduledCheckoutHour,
+    scheduledCheckoutMinute,
+    timeZone
+  );
+
+  const checkIn = attendance?.checkIn ? new Date(attendance.checkIn) : null;
+  if (!checkIn || Number.isNaN(checkIn.getTime())) {
+    return autoCap;
+  }
+
+  // Only finished breaks count toward completion (open breaks are closed with 0 duration in the job)
+  let breakMs = 0;
+  for (const b of attendance.breaks || []) {
+    if (!b?.start || !b?.end) continue;
+    breakMs += Math.max(0, new Date(b.end).getTime() - new Date(b.start).getTime());
+  }
+
+  const manualSec = calculateTotalManualSeconds(attendance.manualHours || []);
+  const netNeededSec = Math.max(0, minShiftSeconds - manualSec);
+  const completion = new Date(checkIn.getTime() + netNeededSec * 1000 + breakMs);
+
+  // max(completed working hours, scheduled checkout), capped at 10 PM
+  let checkoutMs = Math.max(completion.getTime(), scheduledCheckout.getTime());
+  checkoutMs = Math.min(checkoutMs, autoCap.getTime());
+
+  if (checkoutMs <= checkIn.getTime()) {
+    checkoutMs = Math.min(
+      autoCap.getTime(),
+      Math.max(checkIn.getTime() + 60 * 1000, scheduledCheckout.getTime())
+    );
+  }
+
+  return new Date(checkoutMs);
+};
 
 /**
  * Build a UTC Date for a wall-clock time on YYYY-MM-DD in the company timezone.

@@ -154,6 +154,35 @@ const attendanceSchema = new mongoose.Schema({
     }
   },
   /**
+   * Early Leave OT request — employee/HR claims surplus (completed shift → checkout).
+   * Admin/HR later allocates that surplus to General / Management / Early Request / Custom.
+   * While status is Pending, surplus is held in rawOvertimeSurplusMinutes and not auto-bucketed.
+   */
+  overtimeManageRequest: {
+    status: {
+      type: String,
+      enum: ['None', 'Pending', 'Managed', 'Rejected'],
+      default: 'None'
+    },
+    requestedAt: { type: Date },
+    note: { type: String, trim: true },
+    /** Extra minutes from completed working hours to checkout (updated at checkout / manage) */
+    extraMinutes: { type: Number, default: 0 },
+    managedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    managedAt: { type: Date },
+    allocationType: {
+      type: String,
+      enum: ['None', 'General', 'Management', 'EarlyRequest', 'Custom'],
+      default: 'None'
+    },
+    allocations: {
+      generalMinutes: { type: Number, default: 0 },
+      managementMinutes: { type: Number, default: 0 },
+      earlyRequestMinutes: { type: Number, default: 0 }
+    },
+    adminNote: { type: String, trim: true }
+  },
+  /**
    * Explicit employee request to repay a previous early-checkout deficit by working
    * extra minutes on this day. Decoupled from `earlyOvertime` (which tracks the deficit
    * itself on the day it was incurred) and from `earlyLogoutRequest` (leaving early today).

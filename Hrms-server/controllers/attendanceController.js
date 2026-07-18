@@ -3,7 +3,7 @@ import User from '../models/User.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import CompanyHoliday from '../models/CompanyHoliday.js';
 import SystemSettings from '../models/SystemSettings.js';
-import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, recalculateOvertimeBuckets, getMonthKey, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields, resolveLatePenaltyStartTime, calculateEarlyOvertimeDeficit, syncEarlyOvertimeStatus, AUTO_CHECKOUT_HOUR, AUTO_CHECKOUT_MINUTE, buildWallClockDateTime } from '../utils/attendanceUtils.js';
+import { calculateWorkedSeconds, getFlags, getTodayStr, calculateTotalManualSeconds, COMPULSORY_BREAK_EFFECTIVE_DATE, HALF_DAY_MIN_SHIFT_SECONDS, FULL_DAY_MIN_SHIFT_SECONDS, isClockOutTimeAllowed, isWorkedSecondsSufficientForCheckout, isClockInTimeAllowed, syncAllOvertimeRecords, allocateEarlyOvertimeCoverage, recalculateOvertimeBuckets, getMonthKey, hasMinimumTotalBreakTime, getDateStrInTimezone, resolveCheckInTimeForDate, resolveCheckoutTimeForDate, formatCheckoutTimeLabel, hasCheckoutOverrideForDate, hydrateAttendanceOvertimeFields, resolveLatePenaltyStartTime, buildEmployeeSchedule, calculateEarlyOvertimeDeficit, syncEarlyOvertimeStatus, AUTO_CHECKOUT_HOUR, AUTO_CHECKOUT_MINUTE, buildWallClockDateTime, resolveForgottenCheckoutTime } from '../utils/attendanceUtils.js';
 import { logAction } from './auditController.js';
 
 /** Ensure API responses include new OT fields without stripping legacy data. */
@@ -63,6 +63,23 @@ const getOutstandingDeficitMinutesInMonth = (records) =>
     return sum + Math.max(0, (eo.deficitMinutes || 0) - (eo.coveredMinutes || 0));
   }, 0);
 
+const resolveEmployeeScheduleForUser = async (userOrId) => {
+  if (!userOrId) return null;
+  if (
+    userOrId.defaultCheckInTime !== undefined ||
+    userOrId.checkInTimeOverrides !== undefined ||
+    userOrId.defaultCheckoutTime !== undefined ||
+    userOrId.checkoutTimeOverrides !== undefined
+  ) {
+    return buildEmployeeSchedule(userOrId);
+  }
+  const userId = userOrId._id || userOrId;
+  const user = await User.findById(userId)
+    .select('defaultCheckInTime checkInTimeOverrides defaultCheckoutTime checkoutTimeOverrides')
+    .lean();
+  return buildEmployeeSchedule(user);
+};
+
 /** Live worked-time snapshot for OT approval (uses checkout time when present, otherwise now). */
 const getAttendanceOvertimeSnapshot = async (attendance, workedOverride = null) => {
   const userId = attendance.userId?._id || attendance.userId;
@@ -91,6 +108,7 @@ const getAttendanceOvertimeSnapshot = async (attendance, workedOverride = null) 
   }
 
   const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, date);
+  const employeeSchedule = await resolveEmployeeScheduleForUser(attendance.userId || userId);
   const endIso = workedOverride != null
     ? null
     : (attendance.checkOut ? attendance.checkOut.toISOString() : new Date().toISOString());
@@ -107,7 +125,7 @@ const getAttendanceOvertimeSnapshot = async (attendance, workedOverride = null) 
     0,
     date,
     isEarlyReleaseDay,
-    resolveLatePenaltyStartTime(settings, date),
+    resolveLatePenaltyStartTime(settings, date, employeeSchedule),
     tz
   );
   const workedMinutes =
@@ -244,7 +262,8 @@ const parseAdminTimeOnDate = (dateStr, timeStr, timeZone = 'Asia/Kolkata') => {
 
 /**
  * Auto-checkout all open attendance sessions at 10:00 PM (company timezone).
- * Closes any active break and finalizes worked time / OT flags like a normal checkout.
+ * Job still runs at 10 PM, but the stored check-out time is when the employee
+ * completed required working hours (floored at scheduled checkout, e.g. 17:30).
  */
 export const runAutoCheckoutJob = async () => {
   const settings = await SystemSettings.getSettings();
@@ -257,7 +276,7 @@ export const runAutoCheckoutJob = async () => {
     $or: [{ checkOut: null }, { checkOut: { $exists: false } }]
   });
 
-  const checkoutAt = buildWallClockDateTime(
+  const autoCapAt = buildWallClockDateTime(
     today,
     AUTO_CHECKOUT_HOUR,
     AUTO_CHECKOUT_MINUTE,
@@ -267,30 +286,56 @@ export const runAutoCheckoutJob = async () => {
   let processed = 0;
   const total = attendances.length;
 
-  console.log(`[Auto-checkout] Starting for ${today} at 10:00 PM (${tz}) — ${total} open session(s)`);
+  console.log(
+    `[Auto-checkout] Starting for ${today} at 10:00 PM (${tz}) — ${total} open session(s); checkout time = completed hours (min scheduled checkout)`
+  );
 
   for (let index = 0; index < attendances.length; index++) {
     const attendance = attendances[index];
     const checkInTime = new Date(attendance.checkIn).getTime();
 
-    if (checkInTime >= checkoutAt.getTime()) {
+    if (checkInTime >= autoCapAt.getTime()) {
       console.log(
         `[Auto-checkout] [${index + 1}/${total}] Skip user ${attendance.userId} — check-in after 10:00 PM`
       );
       continue;
     }
 
+    // Forgotten open break: close with 0 duration so it does not inflate low-time
     for (const breakEntry of attendance.breaks || []) {
       if (breakEntry.start && !breakEntry.end) {
-        breakEntry.end = checkoutAt;
-        breakEntry.durationSeconds = Math.max(
-          0,
-          Math.floor(
-            (checkoutAt.getTime() - new Date(breakEntry.start).getTime()) / 1000
-          )
-        );
+        breakEntry.end = breakEntry.start;
+        breakEntry.durationSeconds = 0;
       }
     }
+
+    const user = await User.findById(attendance.userId).select(
+      'defaultCheckoutTime checkoutTimeOverrides defaultCheckInTime checkInTimeOverrides'
+    );
+    const employeeSchedule = buildEmployeeSchedule(user);
+    const { hour: checkoutHour, minute: checkoutMinute } = resolveCheckoutTimeForDate(
+      settings,
+      today,
+      employeeSchedule
+    );
+
+    const hasHalfDay = await LeaveRequest.findOne({
+      userId: attendance.userId,
+      startDate: today,
+      category: 'Half Day Leave',
+      status: 'Approved'
+    });
+    const minShiftSeconds = hasHalfDay
+      ? HALF_DAY_MIN_SHIFT_SECONDS
+      : FULL_DAY_MIN_SHIFT_SECONDS;
+
+    const checkoutAt = resolveForgottenCheckoutTime(attendance, {
+      dateStr: today,
+      timeZone: tz,
+      scheduledCheckoutHour: checkoutHour,
+      scheduledCheckoutMinute: checkoutMinute,
+      minShiftSeconds
+    });
 
     attendance.checkOut = checkoutAt;
     const worked = calculateWorkedSeconds(attendance, checkoutAt.toISOString());
@@ -304,12 +349,13 @@ export const runAutoCheckoutJob = async () => {
     processed += 1;
     const pct = total > 0 ? Math.round(((index + 1) / total) * 100) : 100;
     console.log(
-      `[Auto-checkout] [${index + 1}/${total}] (${pct}%) User ${attendance.userId} checked out at 10:00 PM — worked ${worked}s`
+      `[Auto-checkout] [${index + 1}/${total}] (${pct}%) User ${attendance.userId} ` +
+        `recorded checkout ${checkoutAt.toISOString()} (scheduled floor ${String(checkoutHour).padStart(2, '0')}:${String(checkoutMinute).padStart(2, '0')}, job at 10:00 PM) — worked ${worked}s`
     );
   }
 
   console.log(`[Auto-checkout] Done — processed ${processed}/${total} session(s) for ${today}`);
-  return { date: today, total, processed, checkoutAt: checkoutAt.toISOString() };
+  return { date: today, total, processed, checkoutAt: autoCapAt.toISOString() };
 };
 
 export const clockIn = async (req, res) => {
@@ -329,11 +375,19 @@ export const clockIn = async (req, res) => {
     const settings = await SystemSettings.getSettings();
     const tz = settings?.timezone || 'Asia/Kolkata';
     const dateInTz = getDateStrInTimezone(now, tz);
-    const latePenaltyStartTime = resolveLatePenaltyStartTime(settings, dateInTz);
+    const employeeSchedule = {
+      defaultCheckInTime: req.user.defaultCheckInTime,
+      checkInTimeOverrides: req.user.checkInTimeOverrides
+    };
+    const latePenaltyStartTime = resolveLatePenaltyStartTime(settings, dateInTz, employeeSchedule);
 
     // Check-in from configured time (default 08:30, company timezone). Admins exempt.
     if (req.user.role !== 'Admin') {
-      const { hour: checkInHour, minute: checkInMinute } = resolveCheckInTimeForDate(settings, dateInTz);
+      const { hour: checkInHour, minute: checkInMinute } = resolveCheckInTimeForDate(
+        settings,
+        dateInTz,
+        employeeSchedule
+      );
       if (!isClockInTimeAllowed(now, tz, isHoliday, checkInHour, checkInMinute)) {
         return res.status(403).json({
           message: `Check-in is only allowed from ${formatCheckoutTimeLabel(checkInHour, checkInMinute)} (company time)`
@@ -423,7 +477,17 @@ export const clockOut = async (req, res) => {
     const settings = await SystemSettings.getSettings();
     const tz = settings?.timezone || 'Asia/Kolkata';
     const dateInTz = getDateStrInTimezone(now, tz);
-    const { hour: checkoutHour, minute: checkoutMinute } = resolveCheckoutTimeForDate(settings, dateInTz);
+    const employeeSchedule = {
+      defaultCheckInTime: req.user.defaultCheckInTime,
+      checkInTimeOverrides: req.user.checkInTimeOverrides,
+      defaultCheckoutTime: req.user.defaultCheckoutTime,
+      checkoutTimeOverrides: req.user.checkoutTimeOverrides
+    };
+    const { hour: checkoutHour, minute: checkoutMinute } = resolveCheckoutTimeForDate(
+      settings,
+      dateInTz,
+      employeeSchedule
+    );
 
     if (!isClockOutTimeAllowed(now, {
       hasHalfDayLeave: !!hasHalfDay,
@@ -442,7 +506,7 @@ export const clockOut = async (req, res) => {
     }
 
     const workedSecondsBeforeClockout = calculateWorkedSeconds(attendance, now.toISOString());
-    const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, dateInTz);
+    const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, dateInTz, employeeSchedule);
 
     const breakRequirementMet =
       hasMinimumTotalBreakTime(attendance.breaks) ||
@@ -513,7 +577,7 @@ export const clockOut = async (req, res) => {
       0,
       today,
       isEarlyReleaseDay,
-      resolveLatePenaltyStartTime(settings, today), settings?.timezone || 'Asia/Kolkata'
+      resolveLatePenaltyStartTime(settings, today, employeeSchedule), settings?.timezone || 'Asia/Kolkata'
     );
     applyFlagsToAttendance(attendance, flags, worked, {
       isHalfDayApproved: !!hasHalfDay,
@@ -650,10 +714,44 @@ export const getTodayAttendance = async (req, res) => {
       return res.json(null);
     }
 
+    if (attendance.checkIn && !attendance.checkOut) {
+      const settings = await SystemSettings.getSettings();
+      const tz = settings?.timezone || 'Asia/Kolkata';
+      const employeeSchedule = buildEmployeeSchedule(req.user);
+      const hasHalfDay = await LeaveRequest.findOne({
+        userId,
+        startDate: today,
+        category: 'Half Day Leave',
+        status: 'Approved'
+      });
+      const isHoliday = await checkIsHoliday(today);
+      const flags = getFlags(
+        0,
+        !!hasHalfDay,
+        0,
+        isHoliday,
+        attendance.checkIn,
+        attendance.isPenaltyDisabled,
+        0,
+        today,
+        hasCheckoutOverrideForDate(settings, today),
+        resolveLatePenaltyStartTime(settings, today, employeeSchedule),
+        tz
+      );
+      if (
+        attendance.lateCheckIn !== flags.lateCheckIn ||
+        attendance.penaltySeconds !== flags.penaltySeconds
+      ) {
+        attendance.lateCheckIn = flags.lateCheckIn;
+        attendance.penaltySeconds = flags.penaltySeconds;
+        await attendance.save();
+      }
+    }
+
     const response = toAttendanceResponse(attendance);
     if (attendance.checkIn && !attendance.checkOut) {
       const liveWorkedSeconds = calculateWorkedSeconds(attendance, new Date().toISOString());
-      response.liveWorkedSeconds = Math.max(0, liveWorkedSeconds);
+      response.liveWorkedSeconds = Math.max(0, liveWorkedSeconds - (attendance.penaltySeconds || 0));
     }
     res.json(response);
   } catch (error) {
@@ -692,6 +790,7 @@ export const getAttendanceHistory = async (req, res) => {
         });
 
         const settings = await SystemSettings.getSettings();
+        const employeeSchedule = buildEmployeeSchedule(req.user);
         const flags = getFlags(
           worked,
           !!hasHalfDay,
@@ -702,7 +801,7 @@ export const getAttendanceHistory = async (req, res) => {
           0,
           record.date,
           hasCheckoutOverrideForDate(settings, record.date),
-          resolveLatePenaltyStartTime(settings, record.date), settings?.timezone || 'Asia/Kolkata'
+          resolveLatePenaltyStartTime(settings, record.date, employeeSchedule), settings?.timezone || 'Asia/Kolkata'
         );
         record.lowTimeFlag = flags.lowTime;
         record.extraTimeFlag = flags.extraTime;
@@ -1030,6 +1129,15 @@ export const getAllAttendance = async (req, res) => {
       }
     }
 
+    const scheduleUsers = userIds.length
+      ? await User.find({ _id: { $in: userIds } })
+          .select('defaultCheckInTime checkInTimeOverrides defaultCheckoutTime checkoutTimeOverrides')
+          .lean()
+      : [];
+    const scheduleByUserId = new Map(
+      scheduleUsers.map((u) => [u._id.toString(), buildEmployeeSchedule(u)])
+    );
+
     // Now process records in-memory — zero additional DB calls
     const recordsToSave = [];
     for (const record of recordsToProcess) {
@@ -1058,7 +1166,7 @@ export const getAllAttendance = async (req, res) => {
         0,
         record.date,
         isEarlyReleaseDay,
-        resolveLatePenaltyStartTime(systemSettings, record.date), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, record.date, scheduleByUserId.get(uid)), systemSettings?.timezone || 'Asia/Kolkata'
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1110,7 +1218,16 @@ export const getTodayAllAttendance = async (req, res) => {
     const isEarlyReleaseToday = hasCheckoutOverrideForDate(systemSettings, today);
 
     const recordsToProcess = attendance.filter(r => r.checkIn && r.checkOut && !r.isManualFlag);
-    const userIds = recordsToProcess.map(r => r.userId?._id || r.userId);
+    const userIds = [...new Set(recordsToProcess.map(r => (r.userId?._id || r.userId).toString()))];
+
+    const scheduleUsers = userIds.length
+      ? await User.find({ _id: { $in: userIds } })
+          .select('defaultCheckInTime checkInTimeOverrides defaultCheckoutTime checkoutTimeOverrides')
+          .lean()
+      : [];
+    const scheduleByUserId = new Map(
+      scheduleUsers.map((u) => [u._id.toString(), buildEmployeeSchedule(u)])
+    );
 
     let leavesByUserCategory = {};
     if (userIds.length > 0) {
@@ -1151,7 +1268,7 @@ export const getTodayAllAttendance = async (req, res) => {
         0,
         today,
         isEarlyReleaseToday,
-        resolveLatePenaltyStartTime(systemSettings, today), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, today, scheduleByUserId.get(uid)), systemSettings?.timezone || 'Asia/Kolkata'
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1314,6 +1431,12 @@ export const recalculateHalfDayFlags = async (req, res) => {
     const allHolidays = await CompanyHoliday.find({ date: { $in: leaveDates } }, 'date').lean();
     const holidaySet = new Set(allHolidays.map(h => h.date));
     const systemSettings = await SystemSettings.getSettings();
+    const scheduleUsers = await User.find({ _id: { $in: allUserIds } })
+      .select('defaultCheckInTime checkInTimeOverrides defaultCheckoutTime checkoutTimeOverrides')
+      .lean();
+    const scheduleByUserId = new Map(
+      scheduleUsers.map((u) => [u._id.toString(), buildEmployeeSchedule(u)])
+    );
 
     let updatedCount = 0;
     const saves = [];
@@ -1350,7 +1473,7 @@ export const recalculateHalfDayFlags = async (req, res) => {
         0,
         record.date,
         hasCheckoutOverrideForDate(systemSettings, record.date),
-        resolveLatePenaltyStartTime(systemSettings, record.date), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, record.date, scheduleByUserId.get(uid)), systemSettings?.timezone || 'Asia/Kolkata'
       );
       const adjustedWorked = isHolidayWork ? worked : Math.max(0, worked - flags.penaltySeconds);
 
@@ -1440,6 +1563,7 @@ export const addManualHours = async (req, res) => {
     });
 
     const settingsForFlags = await SystemSettings.getSettings();
+    const employeeSchedule = buildEmployeeSchedule(req.user);
     const flags = getFlags(
       worked,
       !!hasHalfDay,
@@ -1450,7 +1574,7 @@ export const addManualHours = async (req, res) => {
       0,
       date,
       hasCheckoutOverrideForDate(settingsForFlags, date),
-      resolveLatePenaltyStartTime(settingsForFlags, date), settingsForFlags?.timezone || 'Asia/Kolkata'
+      resolveLatePenaltyStartTime(settingsForFlags, date, employeeSchedule), settingsForFlags?.timezone || 'Asia/Kolkata'
     );
     applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1500,6 +1624,7 @@ export const adminAddManualHours = async (req, res) => {
     });
 
     const settingsForFlags = await SystemSettings.getSettings();
+    const employeeSchedule = await resolveEmployeeScheduleForUser(userId);
     const flags = getFlags(
       worked,
       !!hasHalfDay,
@@ -1510,7 +1635,7 @@ export const adminAddManualHours = async (req, res) => {
       0,
       date,
       hasCheckoutOverrideForDate(settingsForFlags, date),
-      resolveLatePenaltyStartTime(settingsForFlags, date), settingsForFlags?.timezone || 'Asia/Kolkata'
+      resolveLatePenaltyStartTime(settingsForFlags, date, employeeSchedule), settingsForFlags?.timezone || 'Asia/Kolkata'
     );
     applyFlagsToAttendance(attendance, flags, worked);
 
@@ -1546,6 +1671,12 @@ export const adminBulkAddManualHours = async (req, res) => {
     }
 
     const systemSettings = await SystemSettings.getSettings();
+    const scheduleUsers = await User.find({ _id: { $in: userIds } })
+      .select('defaultCheckInTime checkInTimeOverrides defaultCheckoutTime checkoutTimeOverrides')
+      .lean();
+    const scheduleByUserId = new Map(
+      scheduleUsers.map((u) => [u._id.toString(), buildEmployeeSchedule(u)])
+    );
 
     // Process each user
     const ops = userIds.map(async (userId) => {
@@ -1585,7 +1716,7 @@ export const adminBulkAddManualHours = async (req, res) => {
         0,
         date,
         hasCheckoutOverrideForDate(systemSettings, date),
-        resolveLatePenaltyStartTime(systemSettings, date), systemSettings?.timezone || 'Asia/Kolkata'
+        resolveLatePenaltyStartTime(systemSettings, date, scheduleByUserId.get(userId.toString())), systemSettings?.timezone || 'Asia/Kolkata'
       );
       applyFlagsToAttendance(attendance, flags, worked);
 
@@ -2036,6 +2167,280 @@ export const reviewEarlyOvertimeRepayment = async (req, res) => {
   }
 };
 
+/**
+ * Early Leave — employee/HR creates an OT manage request for surplus
+ * (completed working hours → checkout). Admin/HR later allocates buckets.
+ */
+export const requestEarlyLeaveOvertime = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { note, date } = req.body || {};
+    const targetDate = date || getTodayStr();
+
+    const attendance = await Attendance.findOne({ userId, date: targetDate });
+    if (!attendance || !attendance.checkIn) {
+      return res.status(404).json({ message: 'No attendance record for this date. Check in first.' });
+    }
+
+    if (!(await assertMinimumShiftForOvertimeRequest(attendance, res))) return;
+
+    const existingStatus = attendance.overtimeManageRequest?.status;
+    if (existingStatus === 'Pending') {
+      return res.status(400).json({ message: 'An early leave overtime request is already pending for this day' });
+    }
+    if (existingStatus === 'Managed') {
+      return res.status(400).json({ message: 'Overtime for this day has already been managed' });
+    }
+
+    const endTime = attendance.checkOut || new Date().toISOString();
+    const snapshot = await getAttendanceOvertimeSnapshot(attendance, calculateWorkedSeconds(attendance, endTime));
+    const extraMinutes = Math.max(0, snapshot.surplusMinutes || 0);
+
+    if (attendance.checkOut && extraMinutes <= 0) {
+      return res.status(400).json({
+        message: 'No overtime surplus to request. Extra time is counted from completed working hours to checkout.'
+      });
+    }
+
+    attendance.overtimeManageRequest = {
+      status: 'Pending',
+      requestedAt: new Date(),
+      note: note?.trim() || '',
+      extraMinutes,
+      allocationType: 'None',
+      allocations: {
+        generalMinutes: 0,
+        managementMinutes: 0,
+        earlyRequestMinutes: 0
+      }
+    };
+
+    // If already checked out, hold surplus until Admin/HR allocates it.
+    if (attendance.checkOut) {
+      attendance.rawOvertimeSurplusMinutes = extraMinutes;
+      const sameMonthDeficitRecords = await getSameMonthDeficitRecords(userId, targetDate, attendance._id);
+      recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
+      if (sameMonthDeficitRecords.length > 0) {
+        await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+      }
+    }
+
+    await attendance.save();
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'REQUEST_EARLY_LEAVE_OVERTIME',
+      'ATTENDANCE',
+      attendance._id.toString(),
+      `Early leave OT request (${extraMinutes}m surplus${note?.trim() ? `: ${note.trim()}` : ''})`
+    );
+
+    res.json(toAttendanceResponse(attendance));
+  } catch (error) {
+    console.error('Request early leave overtime error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const getPendingOvertimeManageRequests = async (req, res) => {
+  try {
+    const records = await Attendance.find({ 'overtimeManageRequest.status': 'Pending' })
+      .populate('userId', 'name username email department role')
+      .sort({ 'overtimeManageRequest.requestedAt': -1, updatedAt: -1 });
+
+    // Refresh live extra minutes for open sessions still pending
+    const enriched = records.map((record) => {
+      const doc = toAttendanceResponse(record);
+      if (!record.checkOut && record.checkIn) {
+        const worked = calculateWorkedSeconds(record, new Date().toISOString());
+        const workedMinutes = Math.floor(worked / 60);
+        const minShift = FULL_DAY_MIN_SHIFT_SECONDS / 60;
+        const liveExtra = Math.max(0, Math.floor(workedMinutes - minShift));
+        if (doc.overtimeManageRequest) {
+          doc.overtimeManageRequest.extraMinutes = Math.max(
+            doc.overtimeManageRequest.extraMinutes || 0,
+            liveExtra
+          );
+        }
+      } else if (doc.overtimeManageRequest) {
+        doc.overtimeManageRequest.extraMinutes = Math.max(
+          doc.overtimeManageRequest.extraMinutes || 0,
+          record.rawOvertimeSurplusMinutes || 0
+        );
+      }
+      return doc;
+    });
+
+    res.json(enriched);
+  } catch (error) {
+    console.error('Get pending overtime manage requests error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * Admin/HR allocates pending Early Leave OT surplus.
+ * Body: {
+ *   allocationType: 'General' | 'Management' | 'EarlyRequest' | 'Custom',
+ *   allocations?: { generalMinutes, managementMinutes, earlyRequestMinutes }, // required for Custom
+ *   adminNote?: string
+ * }
+ */
+export const manageOvertimeRequest = async (req, res) => {
+  try {
+    const { recordId } = req.params;
+    const { allocationType, allocations, adminNote } = req.body || {};
+
+    const validTypes = ['General', 'Management', 'EarlyRequest', 'Custom'];
+    if (!validTypes.includes(allocationType)) {
+      return res.status(400).json({
+        message: 'allocationType must be one of: General, Management, EarlyRequest, Custom'
+      });
+    }
+
+    const attendance = await Attendance.findById(recordId).populate('userId', 'name');
+    if (!attendance) {
+      return res.status(404).json({ message: 'Attendance record not found' });
+    }
+    if (attendance.overtimeManageRequest?.status !== 'Pending') {
+      return res.status(400).json({ message: 'No pending early leave overtime request for this record' });
+    }
+    if (!attendance.checkOut) {
+      return res.status(400).json({
+        message: 'Employee must check out before overtime can be managed'
+      });
+    }
+
+    const snapshot = await getAttendanceOvertimeSnapshot(attendance);
+    const extraMinutes = Math.max(
+      0,
+      snapshot.surplusMinutes ||
+        attendance.rawOvertimeSurplusMinutes ||
+        attendance.overtimeManageRequest?.extraMinutes ||
+        0
+    );
+
+    if (extraMinutes <= 0) {
+      return res.status(400).json({ message: 'No overtime surplus available to allocate' });
+    }
+
+    let generalMinutes = 0;
+    let managementMinutes = 0;
+    let earlyRequestMinutes = 0;
+
+    if (allocationType === 'General') {
+      generalMinutes = extraMinutes;
+    } else if (allocationType === 'Management') {
+      managementMinutes = extraMinutes;
+    } else if (allocationType === 'EarlyRequest') {
+      earlyRequestMinutes = extraMinutes;
+    } else {
+      generalMinutes = Math.max(0, Math.floor(Number(allocations?.generalMinutes) || 0));
+      managementMinutes = Math.max(0, Math.floor(Number(allocations?.managementMinutes) || 0));
+      earlyRequestMinutes = Math.max(0, Math.floor(Number(allocations?.earlyRequestMinutes) || 0));
+      const total = generalMinutes + managementMinutes + earlyRequestMinutes;
+      if (total !== extraMinutes) {
+        return res.status(400).json({
+          message: `Custom OT allocations must total exactly ${extraMinutes} minutes (got ${total})`
+        });
+      }
+    }
+
+    attendance.rawOvertimeSurplusMinutes = extraMinutes;
+
+    // Apply bucket targets so recalculateOvertimeBuckets distributes correctly
+    if (managementMinutes > 0) {
+      const prev = attendance.managementOvertime || {};
+      attendance.managementOvertime = {
+        ...prev,
+        reason: prev.reason || 'Allocated via Early Leave OT manage',
+        durationMinutes: managementMinutes,
+        completedMinutes: managementMinutes,
+        status: 'Approved',
+        approvedBy: req.user._id,
+        approvedAt: new Date()
+      };
+    } else if (attendance.managementOvertime?.status === 'Approved') {
+      // Clear prior mgmt credit when this manage pass assigns none
+      attendance.managementOvertime.completedMinutes = 0;
+      attendance.managementOvertime.durationMinutes = 0;
+    }
+
+    if (earlyRequestMinutes > 0) {
+      const prev = attendance.earlyOvertime || {};
+      attendance.earlyOvertime = {
+        ...prev,
+        reason: prev.reason || attendance.overtimeManageRequest?.note || 'Allocated via Early Leave OT manage',
+        durationMinutes: earlyRequestMinutes,
+        completedMinutes: earlyRequestMinutes,
+        requestStatus: 'Approved',
+        approvedBy: req.user._id,
+        approvedAt: new Date(),
+        deficitMinutes: prev.deficitMinutes || 0,
+        coveredMinutes: prev.coveredMinutes || 0,
+        status: prev.status || 'None'
+      };
+    } else if (attendance.earlyOvertime) {
+      attendance.earlyOvertime.completedMinutes = 0;
+    }
+
+    attendance.overtimeManageRequest = {
+      ...(attendance.overtimeManageRequest?.toObject?.() || attendance.overtimeManageRequest || {}),
+      status: 'Managed',
+      extraMinutes,
+      managedBy: req.user._id,
+      managedAt: new Date(),
+      allocationType,
+      allocations: {
+        generalMinutes,
+        managementMinutes,
+        earlyRequestMinutes
+      },
+      adminNote: adminNote?.trim() || ''
+    };
+
+    // Temporarily clear Pending so recalculateOvertimeBuckets allocates normally
+    const sameMonthDeficitRecords = await getSameMonthDeficitRecords(
+      attendance.userId?._id || attendance.userId,
+      attendance.date,
+      attendance._id
+    );
+    recalculateOvertimeBuckets(attendance, sameMonthDeficitRecords);
+
+    // Force general to the managed amount when Custom/General specified
+    // (recalculate already leaves residual as general after mgmt + early)
+    if (allocationType === 'General' || allocationType === 'Custom') {
+      attendance.generalOvertimeMinutes = generalMinutes;
+    }
+
+    attendance.extraTimeFlag =
+      (attendance.generalOvertimeMinutes || 0) > 0 ||
+      managementMinutes > 0 ||
+      earlyRequestMinutes > 0;
+
+    if (sameMonthDeficitRecords.length > 0) {
+      await Promise.all(sameMonthDeficitRecords.map((r) => r.save()));
+    }
+    await attendance.save();
+
+    await logAction(
+      req.user._id,
+      req.user.name,
+      'MANAGE_EARLY_LEAVE_OVERTIME',
+      'ATTENDANCE',
+      recordId,
+      `Managed Early Leave OT as ${allocationType} for ${attendance.userId?.name || 'employee'}: ` +
+        `G=${generalMinutes}m M=${managementMinutes}m E=${earlyRequestMinutes}m`
+    );
+
+    res.json(toAttendanceResponse(attendance));
+  } catch (error) {
+    console.error('Manage overtime request error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 /** Recalculate low/extra flags for all checked-out records on a date (e.g. after checkout override change). */
 export const recalculateAttendanceFlagsForDate = async (dateStr) => {
   if (!dateStr) return { updated: 0, total: 0 };
@@ -2043,7 +2448,6 @@ export const recalculateAttendanceFlagsForDate = async (dateStr) => {
   const settings = await SystemSettings.getSettings();
   const isEarlyReleaseDay = hasCheckoutOverrideForDate(settings, dateStr);
   const tz = settings?.timezone || 'Asia/Kolkata';
-  const latePenaltyStartTime = resolveLatePenaltyStartTime(settings, dateStr);
   const isHolidayWork = !!(await CompanyHoliday.findOne({ date: dateStr }));
 
   // Include open sessions so late penalty updates when cutoff settings change mid-day
@@ -2053,8 +2457,23 @@ export const recalculateAttendanceFlagsForDate = async (dateStr) => {
     isManualFlag: { $ne: true }
   });
 
+  const userIds = [...new Set(records.map((r) => r.userId.toString()))];
+  const scheduleUsers = userIds.length
+    ? await User.find({ _id: { $in: userIds } })
+        .select('defaultCheckInTime checkInTimeOverrides defaultCheckoutTime checkoutTimeOverrides')
+        .lean()
+    : [];
+  const scheduleByUserId = new Map(
+    scheduleUsers.map((u) => [u._id.toString(), buildEmployeeSchedule(u)])
+  );
+
   let updated = 0;
   for (const record of records) {
+    const latePenaltyStartTime = resolveLatePenaltyStartTime(
+      settings,
+      dateStr,
+      scheduleByUserId.get(record.userId.toString())
+    );
     const hasHalfDay = await LeaveRequest.findOne({
       userId: record.userId,
       startDate: dateStr,
