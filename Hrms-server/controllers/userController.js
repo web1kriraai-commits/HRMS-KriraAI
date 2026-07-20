@@ -18,6 +18,25 @@ export const getAllUsers = async (req, res) => {
   }
 };
 
+// Admin/HR: get every user regardless of active status, for the employee management screen
+export const getAllUsersForManagement = async (req, res) => {
+  try {
+    const currentUser = req.user;
+
+    if (currentUser.role !== 'Admin' && currentUser.role !== 'HR') {
+      return res.status(403).json({ message: 'Only Admin and HR can view all users' });
+    }
+
+    const users = await User.find({})
+      .select('-password')
+      .sort({ name: 1 });
+    res.json(users);
+  } catch (error) {
+    console.error('Get all users for management error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // Helper function to convert date to dd-mm-yyyy format
 const formatDateToDDMMYYYY = (dateStr) => {
   if (!dateStr) return undefined;
@@ -304,6 +323,69 @@ export const deleteUser = async (req, res) => {
     res.json({ message: `User ${userName} deleted successfully` });
   } catch (error) {
     console.error('Delete user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Admin/HR: activate or deactivate an employee account (without a full delete)
+export const toggleUserActiveStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+    const currentUser = req.user;
+
+    if (currentUser.role !== 'Admin' && currentUser.role !== 'HR') {
+      return res.status(403).json({ message: 'Only Admin and HR can change employee status' });
+    }
+
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ message: 'isActive must be true or false' });
+    }
+
+    if (currentUser._id.toString() === id) {
+      return res.status(400).json({ message: 'Cannot change the status of your own account' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // HR can only activate/deactivate Employee accounts; Admin can manage anyone
+    if (currentUser.role === 'HR' && user.role !== 'Employee') {
+      return res.status(403).json({ message: 'HR can only change the status of Employee accounts' });
+    }
+
+    if (user.isActive === isActive) {
+      const userObj = user.toObject();
+      delete userObj.password;
+      return res.json({
+        message: `${user.name} is already ${isActive ? 'active' : 'inactive'}`,
+        user: userObj
+      });
+    }
+
+    user.isActive = isActive;
+    await user.save();
+
+    await logAction(
+      currentUser._id,
+      currentUser.name,
+      isActive ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
+      'USER',
+      id,
+      `${isActive ? 'Activated' : 'Deactivated'} ${user.role.toLowerCase()} ${user.name}`
+    );
+
+    const userObj = user.toObject();
+    delete userObj.password;
+
+    res.json({
+      message: `${user.name} ${isActive ? 'activated' : 'deactivated'} successfully`,
+      user: userObj
+    });
+  } catch (error) {
+    console.error('Toggle user active status error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
