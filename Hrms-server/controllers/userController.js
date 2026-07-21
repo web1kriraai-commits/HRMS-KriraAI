@@ -65,6 +65,83 @@ const formatDateToDDMMYYYY = (dateStr) => {
   return dateStr;
 };
 
+const parseBondDate = (dateStr) => {
+  if (!dateStr) return null;
+  const formatted = formatDateToDDMMYYYY(dateStr);
+  const [day, month, year] = formatted.split('-').map(Number);
+  return new Date(year, month - 1, day);
+};
+
+const getMonthEndDate = (year, month) => new Date(year, month, 0);
+
+const calculatePeriodMonthsFromDates = (startDateStr, endDateStr) => {
+  const start = parseBondDate(startDateStr);
+  const end = parseBondDate(endDateStr);
+  if (!start || !end || end <= start) return 0;
+  let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+  if (end.getDate() >= start.getDate()) months += 1;
+  return Math.max(1, months);
+};
+
+const processBondsArray = (bonds, joiningDate) => {
+  if (!bonds || !Array.isArray(bonds) || bonds.length === 0) return [];
+
+  const processed = [];
+
+  for (let index = 0; index < bonds.length; index++) {
+    const bond = bonds[index];
+    let periodMonths = parseInt(bond.periodMonths) || 0;
+    let bondStartDate = bond.startDate ? formatDateToDDMMYYYY(bond.startDate) : null;
+    let bondEndDate = bond.endDate ? formatDateToDDMMYYYY(bond.endDate) : null;
+
+    if (!bondStartDate && index === 0) {
+      bondStartDate = joiningDate;
+    } else if (!bondStartDate && index > 0 && processed[index - 1]) {
+      const prevEndDate = parseBondDate(processed[index - 1].endDate);
+      if (prevEndDate) {
+        prevEndDate.setDate(prevEndDate.getDate() + 1);
+        bondStartDate = formatDateToDDMMYYYY(prevEndDate.toISOString().split('T')[0]);
+      }
+    }
+
+    if (!bondStartDate) continue;
+
+    if (bondEndDate) {
+      if (!periodMonths) {
+        periodMonths = calculatePeriodMonthsFromDates(bondStartDate, bondEndDate);
+      }
+    } else if (periodMonths > 0) {
+      const startDateObj = parseBondDate(bondStartDate);
+      if (!startDateObj) continue;
+      const startMonth = startDateObj.getMonth();
+      const startYear = startDateObj.getFullYear();
+      const totalMonths = startMonth + periodMonths - 1;
+      const endMonth = totalMonths % 12;
+      const endYear = startYear + Math.floor(totalMonths / 12);
+      const endDateObj = getMonthEndDate(endYear, endMonth + 1);
+      bondEndDate = formatDateToDDMMYYYY(endDateObj.toISOString().split('T')[0]);
+    } else {
+      continue;
+    }
+
+    if (!periodMonths) {
+      periodMonths = calculatePeriodMonthsFromDates(bondStartDate, bondEndDate);
+    }
+    if (periodMonths <= 0) continue;
+
+    processed.push({
+      type: bond.type || 'Job',
+      periodMonths,
+      startDate: bondStartDate,
+      endDate: bondEndDate,
+      order: processed.length + 1,
+      salary: Number(bond.salary) > 0 ? Number(bond.salary) : 0,
+    });
+  }
+
+  return processed;
+};
+
 export const createUser = async (req, res) => {
   try {
     const { name, username, email, role, department, password, joiningDate, package: monthlyPackage, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, bankName, bankAccountHolderName, bankAccountNumber, bankIfscCode, salaryBreakdown, paidLeaveAccess } = req.body;
@@ -74,59 +151,7 @@ export const createUser = async (req, res) => {
     const formattedJoiningDate = formatDateToDDMMYYYY(joiningDate);
 
     // Process bonds array - calculate end dates
-    let formattedBonds = [];
-    if (bonds && Array.isArray(bonds) && bonds.length > 0) {
-      formattedBonds = bonds.map((bond, index) => {
-        const periodMonths = parseInt(bond.periodMonths) || 0;
-        if (periodMonths === 0) return null;
-
-        // Calculate bond dates using same logic as salary breakdown
-        const parseDDMMYYYY = (dateStr) => {
-          if (!dateStr) return null;
-          const [day, month, year] = dateStr.split('-').map(Number);
-          return new Date(year, month - 1, day);
-        };
-
-        const getMonthEndDate = (year, month) => {
-          return new Date(year, month, 0);
-        };
-
-        let bondStartDate = bond.startDate || formattedJoiningDate;
-        if (index > 0 && formattedBonds[index - 1]) {
-          // Start from previous bond's end date + 1 day
-          const prevEndDate = parseDDMMYYYY(formattedBonds[index - 1].endDate);
-          if (prevEndDate) {
-            prevEndDate.setDate(prevEndDate.getDate() + 1);
-            bondStartDate = formatDateToDDMMYYYY(prevEndDate.toISOString().split('T')[0]);
-          }
-        }
-
-        // Calculate end date: last day of the month after adding periodMonths
-        const startDateObj = parseDDMMYYYY(bondStartDate);
-        if (!startDateObj) return null;
-
-        // Get the month and year for the end of the bond period
-        const startMonth = startDateObj.getMonth();
-        const startYear = startDateObj.getFullYear();
-
-        // Calculate end month and year (subtract 1 because we want the last day of the month before the next period starts)
-        const totalMonths = startMonth + periodMonths - 1;
-        const endMonth = totalMonths % 12;
-        const endYear = startYear + Math.floor(totalMonths / 12);
-
-        // Get last day of the end month
-        const endDateObj = getMonthEndDate(endYear, endMonth + 1);
-        const bondEndDate = formatDateToDDMMYYYY(endDateObj.toISOString().split('T')[0]);
-
-        return {
-          type: bond.type || 'Job',
-          periodMonths: periodMonths,
-          startDate: bondStartDate,
-          endDate: bondEndDate,
-          order: index + 1
-        };
-      }).filter(bond => bond !== null);
-    }
+    const formattedBonds = processBondsArray(bonds, formattedJoiningDate);
 
     // Process salary breakdown array
     let formattedSalaryBreakdown = [];
@@ -592,55 +617,7 @@ export const updateUser = async (req, res) => {
 
     // Update bonds if provided
     if (bonds !== undefined && Array.isArray(bonds)) {
-      user.bonds = bonds.map((bond, index) => {
-        const periodMonths = parseInt(bond.periodMonths) || 0;
-        if (periodMonths === 0) return null;
-
-        const parseDDMMYYYY = (dateStr) => {
-          if (!dateStr) return null;
-          const [day, month, year] = dateStr.split('-').map(Number);
-          return new Date(year, month - 1, day);
-        };
-
-        const getMonthEndDate = (year, month) => {
-          return new Date(year, month, 0);
-        };
-
-        let bondStartDate = formatDateToDDMMYYYY(bond.startDate) || user.joiningDate;
-        if (index > 0 && user.bonds[index - 1]) {
-          // Start from previous bond's end date + 1 day
-          const prevEndDate = parseDDMMYYYY(user.bonds[index - 1].endDate);
-          if (prevEndDate) {
-            prevEndDate.setDate(prevEndDate.getDate() + 1);
-            bondStartDate = formatDateToDDMMYYYY(prevEndDate.toISOString().split('T')[0]);
-          }
-        }
-
-        // Calculate end date: last day of the month after adding periodMonths
-        const startDateObj = parseDDMMYYYY(bondStartDate);
-        if (!startDateObj) return null;
-
-        // Get the month and year for the end of the bond period
-        const startMonth = startDateObj.getMonth();
-        const startYear = startDateObj.getFullYear();
-
-        // Calculate end month and year (subtract 1 because we want the last day of the month before the next period starts)
-        const totalMonths = startMonth + periodMonths - 1;
-        const endMonth = totalMonths % 12;
-        const endYear = startYear + Math.floor(totalMonths / 12);
-
-        // Get last day of the end month
-        const endDateObj = getMonthEndDate(endYear, endMonth + 1);
-        const bondEndDate = formatDateToDDMMYYYY(endDateObj.toISOString().split('T')[0]);
-
-        return {
-          type: bond.type || 'Job',
-          periodMonths: periodMonths,
-          startDate: bondStartDate,
-          endDate: bondEndDate,
-          order: index + 1
-        };
-      }).filter(bond => bond !== null);
+      user.bonds = processBondsArray(bonds, user.joiningDate);
     }
 
     // Update salary breakdown if provided
@@ -969,6 +946,13 @@ const SALARY_SLIP_TEXT_FIELDS = [
   'pfNo', 'uan'
 ];
 
+const isFutureSalaryPeriod = (month, year) => {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  return year > currentYear || (year === currentYear && month > currentMonth);
+};
+
 const buildSalarySlipPayload = (body, currentUser) => {
   const month = parseInt(body.month, 10);
   const year = parseInt(body.year, 10);
@@ -1059,7 +1043,10 @@ export const getMySalarySlips = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const slips = (user.salarySlips || []).slice().sort((a, b) => {
+    const slips = (user.salarySlips || [])
+      .filter((item) => !isFutureSalaryPeriod(item.month, item.year))
+      .slice()
+      .sort((a, b) => {
       if (a.year !== b.year) return b.year - a.year;
       return b.month - a.month;
     });
@@ -1076,6 +1063,14 @@ export const getMySalarySlip = async (req, res) => {
   try {
     const month = parseInt(req.params.month, 10);
     const year = parseInt(req.params.year, 10);
+
+    if (!month || month < 1 || month > 12 || !year) {
+      return res.status(400).json({ message: 'Valid month and year are required' });
+    }
+
+    if (isFutureSalaryPeriod(month, year)) {
+      return res.status(403).json({ message: 'Salary slips for future periods are not available' });
+    }
 
     const user = await User.findById(req.user._id).select('salarySlips');
     if (!user) {

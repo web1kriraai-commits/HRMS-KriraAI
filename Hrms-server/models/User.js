@@ -116,7 +116,7 @@ const userSchema = new mongoose.Schema({
   },
   package: {
     type: Number,
-    default: 0 // Annual CTC in INR (monthly salary = package / 12)
+    default: 372000 // Annual CTC in INR — 3.72 lakh (monthly salary = package / 12)
   },
   bonds: [{
     type: {
@@ -142,6 +142,10 @@ const userSchema = new mongoose.Schema({
       type: Number, // Order of bond (1, 2, 3, etc.)
       required: true,
       default: 1
+    },
+    salary: {
+      type: Number, // Monthly salary (Job) or stipend (Internship)
+      default: 0
     }
   }],
   salaryBreakdown: [{
