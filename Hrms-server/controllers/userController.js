@@ -67,7 +67,7 @@ const formatDateToDDMMYYYY = (dateStr) => {
 
 export const createUser = async (req, res) => {
   try {
-    const { name, username, email, role, department, password, joiningDate, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, bankName, bankAccountHolderName, bankAccountNumber, bankIfscCode, salaryBreakdown, paidLeaveAccess } = req.body;
+    const { name, username, email, role, department, password, joiningDate, package: monthlyPackage, bonds, aadhaarNumber, guardianName, mobileNumber, guardianMobileNumber, bankName, bankAccountHolderName, bankAccountNumber, bankIfscCode, salaryBreakdown, paidLeaveAccess } = req.body;
     const currentUser = req.user;
 
     // Convert dates to dd-mm-yyyy format if provided
@@ -201,6 +201,7 @@ export const createUser = async (req, res) => {
       isFirstLogin: isFirstLogin,
       isActive: true,
       joiningDate: formattedJoiningDate,
+      package: parseFloat(monthlyPackage) || 0,
       bonds: formattedBonds,
       salaryBreakdown: formattedSalaryBreakdown,
       aadhaarNumber: normalizedAadhaarNumber,
@@ -406,7 +407,7 @@ export const updateUser = async (req, res) => {
       name, email, department, paidLeaveAllocation, paidLeaveAction, 
       manualPaidLeaveAdjustment, manualExtraTimeAdjustment, 
       manualUnpaidLeaveAdjustment, manualHalfDayLeaveAdjustment, 
-      joiningDate, bonds, aadhaarNumber, guardianName, 
+      joiningDate, package: monthlyPackage, bonds, aadhaarNumber, guardianName, 
       mobileNumber, guardianMobileNumber, bankName, bankAccountHolderName,
       bankAccountNumber, bankIfscCode, salaryBreakdown, password,
       lastForwardedMonth, forwardedMonths, forwardedInMonths,
@@ -583,6 +584,10 @@ export const updateUser = async (req, res) => {
     // Update joining date if provided
     if (joiningDate !== undefined) {
       user.joiningDate = formatDateToDDMMYYYY(joiningDate);
+    }
+
+    if (monthlyPackage !== undefined) {
+      user.package = parseFloat(monthlyPackage) || 0;
     }
 
     // Update bonds if provided
@@ -951,16 +956,17 @@ export const getEmployeeStats = async (req, res) => {
 };
 
 const SALARY_SLIP_NUMERIC_FIELDS = [
-  'stdDays', 'workedDays', 'leaveBalance',
-  'basic', 'da', 'totalWage', 'hra', 'medicalReimbursement', 'conveyance',
-  'lta', 'education', 'specialAllowance',
-  'pf', 'esic', 'pTax', 'lwf', 'tds', 'advance', 'exGratia', 'lessAdvance'
+  'paidDays', 'lopDays',
+  'basic', 'ytdBasic',
+  'fixedAllowance', 'ytdFixedAllowance',
+  'lopDeduction', 'ytdLopDeduction',
+  'pTax', 'ytdPTax', 'tds', 'ytdTds'
 ];
 
 const SALARY_SLIP_TEXT_FIELDS = [
-  'companyName', 'companyAddress', 'preparedByName', 'preparedByTitle',
-  'empName', 'empNo', 'department', 'doj', 'bank', 'bankAccountNo',
-  'designation', 'pfNo', 'esicNo'
+  'companyName', 'companyAddress',
+  'empName', 'empNo', 'designation', 'doj', 'payDate',
+  'pfNo', 'uan'
 ];
 
 const buildSalarySlipPayload = (body, currentUser) => {
